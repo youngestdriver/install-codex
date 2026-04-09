@@ -17,6 +17,15 @@ fi
 read -rp "请输入 Base URL [${DEFAULT_BASE_URL}]: " BASE_URL
 BASE_URL="${BASE_URL:-$DEFAULT_BASE_URL}"
 
+if ! command -v npm >/dev/null 2>&1; then
+  echo "未检测到 npm，开始安装 Node.js ..."
+  echo "更新包列表 ..."
+  sudo apt update
+  echo "安装 Node.js 22 ..."
+  curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+  sudo apt install -y nodejs
+fi
+
 echo "安装 @openai/codex ..."
 sudo npm install -g @openai/codex
 
