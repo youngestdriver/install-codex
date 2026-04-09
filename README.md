@@ -14,10 +14,3 @@ bash -c "$(curl -sSL https://raw.githubusercontent.com/youngestdriver/install-co
 
 - `OpenAI API Key`
 - `Base URL`（默认：`https://right.codes/codex/v1`）
-
-如果系统中没有 `npm`，脚本会自动执行：
-
-- `sudo apt update`
-- 安装 Node.js 22（NodeSource）
-- `sudo apt install -y nodejs`
-- `sudo apt install -y bubblewrap`
