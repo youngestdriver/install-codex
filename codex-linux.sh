@@ -27,6 +27,12 @@ if ! command -v npm >/dev/null 2>&1; then
 fi
 
 echo "安装 @openai/codex ..."
+if ! command -v bwrap >/dev/null 2>&1; then
+  echo "bubblewrap not found, installing..."
+  sudo apt update
+  sudo apt install -y bubblewrap
+fi
+
 sudo npm install -g @openai/codex
 
 echo "创建配置目录 ..."
