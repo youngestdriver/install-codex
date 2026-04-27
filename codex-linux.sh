@@ -120,6 +120,14 @@ fi
 read -rp "请输入 Base URL [${DEFAULT_BASE_URL}]: " BASE_URL
 BASE_URL="${BASE_URL:-$DEFAULT_BASE_URL}"
 
+read -rsp "请输入 DeepSeek API Key (用于 Claude Code): " DEEPSEEK_API_KEY
+echo
+
+if [[ -z "${DEEPSEEK_API_KEY}" ]]; then
+  echo "错误：DeepSeek API Key 不能为空。"
+  exit 1
+fi
+
 if ! command_exists npm; then
   install_nodejs
 fi
@@ -130,6 +138,37 @@ fi
 
 echo "安装 @openai/codex ..."
 run_as_root npm install -g @openai/codex
+
+echo "安装 @anthropic-ai/claude-code ..."
+run_as_root npm install -g @anthropic-ai/claude-code
+
+echo "安装 cc-switch-cli (SaladDay) ..."
+if ! command_exists cc-switch; then
+  export CC_SWITCH_FORCE=1
+  curl -fsSL https://github.com/SaladDay/cc-switch-cli/releases/latest/download/install.sh | bash
+  # 确保 cc-switch 在当前会话中可用
+  export PATH="$HOME/.local/bin:$PATH"
+  echo 'export PATH="$HOME/.local/bin:$PATH"  # cc-switch' >> "$HOME/.bashrc"
+fi
+
+echo "配置 Claude Code 使用 DeepSeek ..."
+CLAUDE_DIR="$HOME/.claude"
+mkdir -p "$CLAUDE_DIR"
+cat > "$CLAUDE_DIR/settings.json" <<EOF
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "${DEEPSEEK_API_KEY}",
+    "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+    "ANTHROPIC_MODEL": "deepseek-v4-flash",
+    "ANTHROPIC_DEFAULT_MODEL": "deepseek-v4-pro",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-pro",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-v4-flash",
+    "ANTHROPIC_MODEL_SONNET": "deepseek-v4-pro",
+    "ANTHROPIC_REASONING_MODEL": "deepseek-v4-pro"
+  }
+}
+EOF
+chmod 700 "$CLAUDE_DIR"
 
 echo "创建配置目录 ..."
 mkdir -p "$CODEX_DIR"
@@ -165,3 +204,12 @@ echo
 echo "完成。已生成："
 echo "  - $AUTH_FILE"
 echo "  - $CONFIG_FILE"
+echo "  - $CLAUDE_DIR/settings.json"
+echo
+echo "已安装："
+echo "  - @openai/codex"
+echo "  - @anthropic-ai/claude-code"
+echo "  - cc-switch-cli"
+echo
+echo "提示：运行 cc-switch 可切换 Claude Code 的不同 provider。"
+echo "      运行 claude 可启动 Claude Code。"
