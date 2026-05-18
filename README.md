@@ -1,6 +1,6 @@
 # install-codex
 
-用于在 Linux 环境下初始化 Codex / Claude Code 配置并安装 `@openai/codex`、`@anthropic-ai/claude-code` 和 `cc-switch-cli` 的脚本。
+用于在 Linux 环境下初始化 Codex / Claude Code / CC-switch 的脚本。
 
 ## 一键启动
 
@@ -27,12 +27,11 @@ bash -c "$(curl -sSL https://raw.githubusercontent.com/youngestdriver/install-co
 - **Codex** — `@openai/codex` 全局 npm 安装，并生成 `~/.codex/auth.json` 和 `~/.codex/config.toml`
 - **Claude Code** — `@anthropic-ai/claude-code` 全局 npm 安装
 - **cc-switch-cli** — 用于管理 Claude Code / Codex 等工具的 provider 切换
-- **DeepSeek 配置** — 自动生成 `~/.claude/settings.json`，默认使用 DeepSeek 的 Anthropic 兼容接口 (`https://api.deepseek.com/anthropic`)
 
 ## 使用
 
 ```bash
-claude      # 启动 Claude Code（默认使用 DeepSeek）
-cc-switch   # 切换 Claude Code 的 provider
+cc-switch   # 切换 provider
+claude      # 启动 Claude Code
 codex       # 启动 Codex
 ```
