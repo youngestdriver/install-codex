@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SKIP_CONFIG=false
+WEBDAV_IMPORT=false
 if [[ "${1:-}" == "--uninstall" ]]; then
   echo "=== 卸载 Codex / Claude Code / cc-switch-cli ==="
   echo
@@ -82,6 +83,15 @@ else
   read -rp "跳过配置 API Key 和 URL？[y/N]: " SKIP_ANSWER
   if [[ "$SKIP_ANSWER" =~ ^[Yy]$ ]]; then
     SKIP_CONFIG=true
+  else
+    read -rp "从 WebDAV 导入配置？[y/N]: " WEBDAV_ANSWER
+    if [[ "$WEBDAV_ANSWER" =~ ^[Yy]$ ]]; then
+      WEBDAV_IMPORT=true
+      read -rp "WebDAV Base URL: " WEBDAV_URL
+      read -rp "WebDAV Username: " WEBDAV_USER
+      read -rsp "WebDAV Password: " WEBDAV_PASS
+      echo
+    fi
   fi
 fi
 
@@ -205,7 +215,7 @@ install_bubblewrap() {
 
 SHELL_RC="$(detect_shell_rc)"
 
-if [[ "$SKIP_CONFIG" != "true" ]]; then
+if [[ "$SKIP_CONFIG" != "true" && "$WEBDAV_IMPORT" != "true" ]]; then
   read -rsp "请输入 OpenAI API Key: " OPENAI_API_KEY
   echo
 
@@ -249,12 +259,23 @@ if ! command_exists cc-switch; then
   echo 'export PATH="$HOME/.local/bin:$PATH"  # cc-switch' >> "$SHELL_RC"
 fi
 
+if [[ "$WEBDAV_IMPORT" == "true" ]]; then
+  echo "从 WebDAV 导入配置 ..."
+  "$HOME/.local/bin/cc-switch" config webdav set \
+    --base-url "$WEBDAV_URL" \
+    --username "$WEBDAV_USER" \
+    --password "$WEBDAV_PASS" \
+    --enable
+  "$HOME/.local/bin/cc-switch" config webdav download
+  echo "WebDAV 配置导入完成。"
+fi
+
 # 将 IS_SANDBOX=1 写入 Shell 配置文件
 if ! grep -q 'export IS_SANDBOX=1' "$SHELL_RC" 2>/dev/null; then
   echo 'export IS_SANDBOX=1' >> "$SHELL_RC"
 fi
 
-if [[ "$SKIP_CONFIG" != "true" ]]; then
+if [[ "$SKIP_CONFIG" != "true" && "$WEBDAV_IMPORT" != "true" ]]; then
   echo "配置 Claude Code 使用 DeepSeek ..."
   CLAUDE_DIR="$HOME/.claude"
   mkdir -p "$CLAUDE_DIR"
