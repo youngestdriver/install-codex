@@ -56,7 +56,8 @@ if [[ "${1:-}" == "--uninstall" ]]; then
   rm -rf "$HOME/.codex" 2>/dev/null
   rm -f "$HOME/.claude/settings.json" 2>/dev/null
   rmdir "$HOME/.claude" 2>/dev/null || true
-  echo "  已删除 ~/.codex 和 ~/.claude/settings.json"
+  rm -rf "$HOME/.cc-switch" 2>/dev/null
+  echo "  已删除 ~/.codex、~/.claude/settings.json 和 ~/.cc-switch"
 
   # 清理 shell rc 中的条目
   SHELL_RC=""
