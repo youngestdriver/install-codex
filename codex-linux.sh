@@ -15,11 +15,23 @@ if [[ "${1:-}" == "--uninstall" ]]; then
 
   # 卸载 npm 全局包
   if command -v npm >/dev/null 2>&1; then
-    echo "卸载 @openai/codex ..."
     run_as_root() { command -v sudo >/dev/null 2>&1 && sudo "$@" || "$@"; }
-    run_as_root npm uninstall -g @openai/codex 2>/dev/null || echo "  (跳过，可能未安装)"
-    echo "卸载 @anthropic-ai/claude-code ..."
-    run_as_root npm uninstall -g @anthropic-ai/claude-code 2>/dev/null || echo "  (跳过，可能未安装)"
+    NPM_GLOBAL="$(npm root -g)"
+
+    for pkg in "@openai/codex" "@anthropic-ai/claude-code"; do
+      echo "卸载 ${pkg} ..."
+      if ! run_as_root npm uninstall -g "$pkg" 2>/dev/null; then
+        # npm uninstall 可能因 ENOTEMPTY 等错误失败，直接删除目录
+        echo "  npm 卸载失败，直接删除文件 ..."
+        pkg_dir="${NPM_GLOBAL}/${pkg}"
+        if [[ -d "$pkg_dir" ]]; then
+          run_as_root rm -rf "$pkg_dir"
+          echo "  已删除 ${pkg_dir}"
+        else
+          echo "  (跳过，未找到 ${pkg_dir})"
+        fi
+      fi
+    done
   else
     echo "npm 未找到，跳过 npm 包卸载。"
   fi
