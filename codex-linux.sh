@@ -175,13 +175,22 @@ cat > "$CLAUDE_DIR/settings.json" <<EOF
   "env": {
     "ANTHROPIC_AUTH_TOKEN": "${DEEPSEEK_API_KEY}",
     "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
-    "ANTHROPIC_MODEL": "deepseek-v4-flash",
-    "ANTHROPIC_DEFAULT_MODEL": "deepseek-v4-pro",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-pro",
+    "ANTHROPIC_MODEL": "deepseek-v4-pro[1M]",
+    "ANTHROPIC_DEFAULT_MODEL": "deepseek-v4-pro[1M]",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-pro[1M]",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-v4-flash",
-    "ANTHROPIC_MODEL_SONNET": "deepseek-v4-pro",
-    "ANTHROPIC_REASONING_MODEL": "deepseek-v4-pro"
-  }
+    "ANTHROPIC_MODEL_SONNET": "deepseek-v4-pro[1M]",
+    "ANTHROPIC_REASONING_MODEL": "deepseek-v4-pro[1M]",
+    "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": "1",
+    "CLAUDE_CODE_EFFORT_LEVEL": "max"
+  },
+  "includeCoAuthoredBy": true,
+  "permissions": {
+    "defaultMode": "bypassPermissions"
+  },
+  "skipDangerousModePermissionPrompt": true
 }
 EOF
 chmod 700 "$CLAUDE_DIR"
