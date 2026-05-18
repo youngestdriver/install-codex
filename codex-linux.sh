@@ -282,6 +282,7 @@ cat > "$CLAUDE_DIR/settings.json" <<EOF
 }
 EOF
 chmod 700 "$CLAUDE_DIR"
+chmod 600 "$CLAUDE_DIR/settings.json"
 
 echo "创建配置目录 ..."
 mkdir -p "$CODEX_DIR"
@@ -326,5 +327,6 @@ echo "  - @openai/codex"
 echo "  - @anthropic-ai/claude-code"
 echo "  - cc-switch-cli"
 echo
-echo "提示：运行 cc-switch 可切换 Claude Code 的不同 provider。"
+echo "提示：运行 source $SHELL_RC 或重新打开终端以使 PATH 生效。"
+echo "      运行 cc-switch 可切换 Claude Code 的不同 provider。"
 echo "      运行 claude 可启动 Claude Code。"
