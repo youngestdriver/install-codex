@@ -18,6 +18,13 @@ if [[ "${1:-}" == "--uninstall" ]]; then
     run_as_root() { command -v sudo >/dev/null 2>&1 && sudo "$@" || "$@"; }
     NPM_GLOBAL="$(run_as_root npm root -g)"
 
+    NPM_BIN="$(run_as_root npm bin -g)"
+
+    declare -A PKG_BINS=(
+      ["@openai/codex"]="codex"
+      ["@anthropic-ai/claude-code"]="claude"
+    )
+
     for pkg in "@openai/codex" "@anthropic-ai/claude-code"; do
       echo "卸载 ${pkg} ..."
       if ! run_as_root npm uninstall -g "$pkg" 2>/dev/null; then
@@ -27,6 +34,14 @@ if [[ "${1:-}" == "--uninstall" ]]; then
         if [[ -d "$pkg_dir" ]]; then
           run_as_root rm -rf "$pkg_dir"
           echo "  已删除 ${pkg_dir}"
+
+          # 清理对应的 bin 软链接
+          bin_name="${PKG_BINS[$pkg]}"
+          bin_link="${NPM_BIN}/${bin_name}"
+          if [[ -L "$bin_link" ]]; then
+            run_as_root rm -f "$bin_link"
+            echo "  已删除 ${bin_link}"
+          fi
         else
           echo "  (跳过，未找到 ${pkg_dir})"
         fi
