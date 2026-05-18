@@ -1,6 +1,71 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SKIP_CONFIG=false
+if [[ "${1:-}" == "--uninstall" ]]; then
+  echo "=== 卸载 Codex / Claude Code / cc-switch-cli ==="
+  echo
+
+  read -rp "确认卸载？将删除所有相关工具和配置文件 [y/N]: " CONFIRM
+  if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+    echo "已取消。"
+    exit 0
+  fi
+  echo
+
+  # 卸载 npm 全局包
+  if command -v npm >/dev/null 2>&1; then
+    echo "卸载 @openai/codex ..."
+    run_as_root() { command -v sudo >/dev/null 2>&1 && sudo "$@" || "$@"; }
+    run_as_root npm uninstall -g @openai/codex 2>/dev/null || echo "  (跳过，可能未安装)"
+    echo "卸载 @anthropic-ai/claude-code ..."
+    run_as_root npm uninstall -g @anthropic-ai/claude-code 2>/dev/null || echo "  (跳过，可能未安装)"
+  else
+    echo "npm 未找到，跳过 npm 包卸载。"
+  fi
+
+  # 卸载 cc-switch-cli
+  echo "卸载 cc-switch-cli ..."
+  rm -f "$HOME/.local/bin/cc-switch" 2>/dev/null
+  rm -rf "$HOME/.local/share/cc-switch" 2>/dev/null
+  rm -rf "$HOME/.local/share/cc-switch-cli" 2>/dev/null
+  echo "  (如果已安装，已从 ~/.local/bin 和 ~/.local/share 中移除)"
+
+  # 删除配置文件
+  echo "删除配置文件 ..."
+  rm -rf "$HOME/.codex" 2>/dev/null
+  rm -f "$HOME/.claude/settings.json" 2>/dev/null
+  rmdir "$HOME/.claude" 2>/dev/null || true
+  echo "  已删除 ~/.codex 和 ~/.claude/settings.json"
+
+  # 清理 shell rc 中的条目
+  SHELL_RC=""
+  for candidate in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.config/fish/config.fish"; do
+    if [[ -f "$candidate" ]]; then
+      SHELL_RC="$candidate"
+      break
+    fi
+  done
+  if [[ -n "$SHELL_RC" ]] && [[ -f "$SHELL_RC" ]]; then
+    echo "清理 $SHELL_RC 中的相关条目 ..."
+    sed -i '/# cc-switch/d; /export IS_SANDBOX=1/d' "$SHELL_RC"
+    echo "  已清理。"
+  fi
+
+  echo
+  echo "卸载完成。"
+  exit 0
+fi
+
+if [[ "${1:-}" == "--skip-config" ]]; then
+  SKIP_CONFIG=true
+else
+  read -rp "跳过配置 API Key 和 URL？[y/N]: " SKIP_ANSWER
+  if [[ "$SKIP_ANSWER" =~ ^[Yy]$ ]]; then
+    SKIP_CONFIG=true
+  fi
+fi
+
 CODEX_DIR="$HOME/.codex"
 AUTH_FILE="$CODEX_DIR/auth.json"
 CONFIG_FILE="$CODEX_DIR/config.toml"
@@ -16,7 +81,6 @@ fi
 
 DISTRO_ID="${ID:-}"
 DISTRO_LIKE="${ID_LIKE:-}"
-SHELL_RC="$(detect_shell_rc)"
 
 command_exists() {
   command -v "$1" >/dev/null 2>&1
@@ -120,23 +184,27 @@ install_bubblewrap() {
   exit 1
 }
 
-read -rsp "请输入 OpenAI API Key: " OPENAI_API_KEY
-echo
+SHELL_RC="$(detect_shell_rc)"
 
-if [[ -z "${OPENAI_API_KEY}" ]]; then
-  echo "错误：API Key 不能为空。"
-  exit 1
-fi
+if [[ "$SKIP_CONFIG" != "true" ]]; then
+  read -rsp "请输入 OpenAI API Key: " OPENAI_API_KEY
+  echo
 
-read -rp "请输入 Base URL [${DEFAULT_BASE_URL}]: " BASE_URL
-BASE_URL="${BASE_URL:-$DEFAULT_BASE_URL}"
+  if [[ -z "${OPENAI_API_KEY}" ]]; then
+    echo "错误：API Key 不能为空。"
+    exit 1
+  fi
 
-read -rsp "请输入 DeepSeek API Key (用于 Claude Code): " DEEPSEEK_API_KEY
-echo
+  read -rp "请输入 Base URL [${DEFAULT_BASE_URL}]: " BASE_URL
+  BASE_URL="${BASE_URL:-$DEFAULT_BASE_URL}"
 
-if [[ -z "${DEEPSEEK_API_KEY}" ]]; then
-  echo "错误：DeepSeek API Key 不能为空。"
-  exit 1
+  read -rsp "请输入 DeepSeek API Key (用于 Claude Code): " DEEPSEEK_API_KEY
+  echo
+
+  if [[ -z "${DEEPSEEK_API_KEY}" ]]; then
+    echo "错误：DeepSeek API Key 不能为空。"
+    exit 1
+  fi
 fi
 
 if ! command_exists npm; then
@@ -167,9 +235,10 @@ if ! grep -q 'export IS_SANDBOX=1' "$SHELL_RC" 2>/dev/null; then
   echo 'export IS_SANDBOX=1' >> "$SHELL_RC"
 fi
 
-echo "配置 Claude Code 使用 DeepSeek ..."
-CLAUDE_DIR="$HOME/.claude"
-mkdir -p "$CLAUDE_DIR"
+if [[ "$SKIP_CONFIG" != "true" ]]; then
+  echo "配置 Claude Code 使用 DeepSeek ..."
+  CLAUDE_DIR="$HOME/.claude"
+  mkdir -p "$CLAUDE_DIR"
 cat > "$CLAUDE_DIR/settings.json" <<EOF
 {
   "env": {
@@ -231,6 +300,8 @@ echo "  - $AUTH_FILE"
 echo "  - $CONFIG_FILE"
 echo "  - $CLAUDE_DIR/settings.json"
 echo
+fi
+
 echo "已安装："
 echo "  - @openai/codex"
 echo "  - @anthropic-ai/claude-code"
