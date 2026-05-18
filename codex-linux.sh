@@ -16,9 +16,20 @@ fi
 
 DISTRO_ID="${ID:-}"
 DISTRO_LIKE="${ID_LIKE:-}"
+SHELL_RC="$(detect_shell_rc)"
 
 command_exists() {
   command -v "$1" >/dev/null 2>&1
+}
+
+detect_shell_rc() {
+  local shell_name
+  shell_name="$(basename "${SHELL:-/bin/bash}")"
+  case "$shell_name" in
+    zsh)  echo "$HOME/.zshrc" ;;
+    fish) echo "$HOME/.config/fish/config.fish" ;;
+    *)    echo "$HOME/.bashrc" ;;  # bash, sh, 以及其他默认使用 .bashrc
+  esac
 }
 
 run_as_root() {
@@ -148,7 +159,12 @@ if ! command_exists cc-switch; then
   curl -fsSL https://github.com/SaladDay/cc-switch-cli/releases/latest/download/install.sh | bash
   # 确保 cc-switch 在当前会话中可用
   export PATH="$HOME/.local/bin:$PATH"
-  echo 'export PATH="$HOME/.local/bin:$PATH"  # cc-switch' >> "$HOME/.bashrc"
+  echo 'export PATH="$HOME/.local/bin:$PATH"  # cc-switch' >> "$SHELL_RC"
+fi
+
+# 将 IS_SANDBOX=1 写入 Shell 配置文件
+if ! grep -q 'export IS_SANDBOX=1' "$SHELL_RC" 2>/dev/null; then
+  echo 'export IS_SANDBOX=1' >> "$SHELL_RC"
 fi
 
 echo "配置 Claude Code 使用 DeepSeek ..."
