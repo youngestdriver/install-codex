@@ -16,7 +16,7 @@ if [[ "${1:-}" == "--uninstall" ]]; then
   # 卸载 npm 全局包
   if command -v npm >/dev/null 2>&1; then
     run_as_root() { command -v sudo >/dev/null 2>&1 && sudo "$@" || "$@"; }
-    NPM_GLOBAL="$(npm root -g)"
+    NPM_GLOBAL="$(run_as_root npm root -g)"
 
     for pkg in "@openai/codex" "@anthropic-ai/claude-code"; do
       echo "卸载 ${pkg} ..."
