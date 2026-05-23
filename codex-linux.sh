@@ -245,11 +245,23 @@ if ! command_exists bwrap; then
   install_bubblewrap
 fi
 
-echo "安装 @openai/codex ..."
-run_as_root npm install -g @openai/codex
+install_npm_pkg() {
+  local pkg="$1" rc
+  echo "安装 ${pkg} ..."
+  run_as_root npm install -g "$pkg" && return 0
+  rc=$?
+  local pkg_dir="$(run_as_root npm root -g)/${pkg}"
+  if [[ -d "$pkg_dir" ]]; then
+    echo "  npm install 失败 (exit ${rc})，可能是残留目录导致，清理后重试 ..."
+    run_as_root rm -rf "$pkg_dir"
+    run_as_root npm install -g "$pkg"
+  else
+    return $rc
+  fi
+}
 
-echo "安装 @anthropic-ai/claude-code ..."
-run_as_root npm install -g @anthropic-ai/claude-code
+install_npm_pkg @openai/codex
+install_npm_pkg @anthropic-ai/claude-code
 
 echo "安装 cc-switch-cli (SaladDay) ..."
 if ! command_exists cc-switch; then
