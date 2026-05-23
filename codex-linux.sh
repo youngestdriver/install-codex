@@ -279,8 +279,11 @@ if [[ "$WEBDAV_IMPORT" == "true" ]]; then
     --username "$WEBDAV_USER" \
     --password "$WEBDAV_PASS" \
     --enable
-  "$HOME/.local/bin/cc-switch" config webdav download
-  echo "WebDAV 配置导入完成。"
+  if "$HOME/.local/bin/cc-switch" config webdav download; then
+    echo "WebDAV 配置导入完成。"
+  else
+    echo "警告: WebDAV 配置拉取失败，请检查网络连接和凭据后重试。"
+  fi
 fi
 
 # 将 IS_SANDBOX=1 写入 Shell 配置文件
