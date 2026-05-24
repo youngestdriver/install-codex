@@ -280,6 +280,19 @@ if [[ "$WEBDAV_IMPORT" == "true" ]]; then
     --password "$WEBDAV_PASS" \
     --enable
   if "$HOME/.local/bin/cc-switch" config webdav download; then
+    echo "WebDAV 配置下载完成，正在应用配置到应用目录 ..."
+    # download 只恢复到 cc-switch 内部数据库，需通过 provider switch 将配置写入应用目录
+    CC_SETTINGS="$HOME/.cc-switch/settings.json"
+    if [[ -f "$CC_SETTINGS" ]]; then
+      CLAUDE_PROVIDER=$(grep '"currentProviderClaude"' "$CC_SETTINGS" 2>/dev/null | grep -o '[a-f0-9]\{8\}-[a-f0-9]\{4\}-[a-f0-9]\{4\}-[a-f0-9]\{4\}-[a-f0-9]\{12\}' | head -1 || true)
+      if [[ -n "$CLAUDE_PROVIDER" ]]; then
+        "$HOME/.local/bin/cc-switch" provider switch "$CLAUDE_PROVIDER" --app claude 2>/dev/null || true
+      fi
+      CODEX_PROVIDER=$(grep '"currentProviderCodex"' "$CC_SETTINGS" 2>/dev/null | grep -o '[a-f0-9]\{8\}-[a-f0-9]\{4\}-[a-f0-9]\{4\}-[a-f0-9]\{4\}-[a-f0-9]\{12\}' | head -1 || true)
+      if [[ -n "$CODEX_PROVIDER" ]]; then
+        "$HOME/.local/bin/cc-switch" provider switch "$CODEX_PROVIDER" --app codex 2>/dev/null || true
+      fi
+    fi
     echo "WebDAV 配置导入完成。"
   else
     echo "警告: WebDAV 配置拉取失败，请检查网络连接和凭据后重试。"
