@@ -272,14 +272,21 @@ if ! command_exists cc-switch; then
   echo 'export PATH="$HOME/.local/bin:$PATH"  # cc-switch' >> "$SHELL_RC"
 fi
 
+# 将 IS_SANDBOX=1 尽早写入，避免后续任何步骤失败导致遗漏
+if ! grep -q '^export IS_SANDBOX=1$' "$SHELL_RC" 2>/dev/null; then
+  echo 'export IS_SANDBOX=1  # cc-switch' >> "$SHELL_RC"
+fi
+export IS_SANDBOX=1  # 当前会话也立即生效
+
 if [[ "$WEBDAV_IMPORT" == "true" ]]; then
   echo "从 WebDAV 导入配置 ..."
-  "$HOME/.local/bin/cc-switch" config webdav set \
+  if ! "$HOME/.local/bin/cc-switch" config webdav set \
     --base-url "$WEBDAV_URL" \
     --username "$WEBDAV_USER" \
     --password "$WEBDAV_PASS" \
-    --enable
-  if "$HOME/.local/bin/cc-switch" config webdav download; then
+    --enable; then
+    echo "错误: WebDAV 配置设置失败，跳过导入。"
+  elif "$HOME/.local/bin/cc-switch" config webdav download; then
     echo "WebDAV 配置下载完成，正在应用配置到应用目录 ..."
     # download 只恢复到 cc-switch 内部数据库，需通过 provider switch 将配置写入应用目录
     CC_SETTINGS="$HOME/.cc-switch/settings.json"
@@ -297,11 +304,6 @@ if [[ "$WEBDAV_IMPORT" == "true" ]]; then
   else
     echo "警告: WebDAV 配置拉取失败，请检查网络连接和凭据后重试。"
   fi
-fi
-
-# 将 IS_SANDBOX=1 写入 Shell 配置文件
-if ! grep -q 'export IS_SANDBOX=1' "$SHELL_RC" 2>/dev/null; then
-  echo 'export IS_SANDBOX=1' >> "$SHELL_RC"
 fi
 
 if [[ "$SKIP_CONFIG" != "true" && "$WEBDAV_IMPORT" != "true" ]]; then
