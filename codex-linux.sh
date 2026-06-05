@@ -3,6 +3,33 @@ set -euo pipefail
 
 SKIP_CONFIG=false
 WEBDAV_IMPORT=false
+
+command_exists() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+run_as_root() {
+  if command_exists sudo; then
+    sudo "$@"
+  else
+    "$@"
+  fi
+}
+
+detect_shell_rc() {
+  local shell_name
+  shell_name="$(basename "${SHELL:-/bin/bash}")"
+  case "$shell_name" in
+    zsh)  echo "$HOME/.zshrc" ;;
+    fish) echo "$HOME/.config/fish/config.fish" ;;
+    *)    echo "$HOME/.bashrc" ;;  # bash, sh, 以及其他默认使用 .bashrc
+  esac
+}
+
+is_fish_rc() {
+  [[ "$1" == *"/fish/config.fish" ]]
+}
+
 if [[ "${1:-}" == "--uninstall" ]]; then
   echo "=== 卸载 Codex / Claude Code / cc-switch-cli ==="
   echo
@@ -15,8 +42,7 @@ if [[ "${1:-}" == "--uninstall" ]]; then
   echo
 
   # 卸载 npm 全局包
-  if command -v npm >/dev/null 2>&1; then
-    run_as_root() { command -v sudo >/dev/null 2>&1 && sudo "$@" || "$@"; }
+  if command_exists npm; then
     NPM_GLOBAL="$(run_as_root npm root -g)"
 
     for pkg in "@openai/codex" "@anthropic-ai/claude-code"; do
@@ -59,17 +85,11 @@ if [[ "${1:-}" == "--uninstall" ]]; then
   rm -rf "$HOME/.cc-switch" 2>/dev/null
   echo "  已删除 ~/.codex、~/.claude/settings.json 和 ~/.cc-switch"
 
-  # 清理 shell rc 中的条目
-  SHELL_RC=""
-  for candidate in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.config/fish/config.fish"; do
-    if [[ -f "$candidate" ]]; then
-      SHELL_RC="$candidate"
-      break
-    fi
-  done
+  # 清理 shell rc 中的条目（与安装时写入的文件保持一致）
+  SHELL_RC="$(detect_shell_rc)"
   if [[ -n "$SHELL_RC" ]] && [[ -f "$SHELL_RC" ]]; then
     echo "清理 $SHELL_RC 中的相关条目 ..."
-    sed -i '/# cc-switch/d; /export IS_SANDBOX=1/d' "$SHELL_RC"
+    sed -i '/# cc-switch/d' "$SHELL_RC"
     echo "  已清理。"
   fi
 
@@ -111,28 +131,6 @@ fi
 
 DISTRO_ID="${ID:-}"
 DISTRO_LIKE="${ID_LIKE:-}"
-
-command_exists() {
-  command -v "$1" >/dev/null 2>&1
-}
-
-detect_shell_rc() {
-  local shell_name
-  shell_name="$(basename "${SHELL:-/bin/bash}")"
-  case "$shell_name" in
-    zsh)  echo "$HOME/.zshrc" ;;
-    fish) echo "$HOME/.config/fish/config.fish" ;;
-    *)    echo "$HOME/.bashrc" ;;  # bash, sh, 以及其他默认使用 .bashrc
-  esac
-}
-
-run_as_root() {
-  if command_exists sudo; then
-    sudo "$@"
-  else
-    "$@"
-  fi
-}
 
 is_debian_like() {
   [[ "$DISTRO_ID" == "debian" || "$DISTRO_ID" == "ubuntu" || " $DISTRO_LIKE " == *" debian "* ]]
@@ -269,12 +267,20 @@ if ! command_exists cc-switch; then
   curl -fsSL https://github.com/SaladDay/cc-switch-cli/releases/latest/download/install.sh | bash
   # 确保 cc-switch 在当前会话中可用
   export PATH="$HOME/.local/bin:$PATH"
-  echo 'export PATH="$HOME/.local/bin:$PATH"  # cc-switch' >> "$SHELL_RC"
+  if is_fish_rc "$SHELL_RC"; then
+    echo 'set -gx PATH "$HOME/.local/bin" $PATH  # cc-switch' >> "$SHELL_RC"
+  else
+    echo 'export PATH="$HOME/.local/bin:$PATH"  # cc-switch' >> "$SHELL_RC"
+  fi
 fi
 
 # 将 IS_SANDBOX=1 尽早写入，避免后续任何步骤失败导致遗漏
-if ! grep -q '^export IS_SANDBOX=1$' "$SHELL_RC" 2>/dev/null; then
-  echo 'export IS_SANDBOX=1  # cc-switch' >> "$SHELL_RC"
+if ! grep -q '# cc-switch' "$SHELL_RC" 2>/dev/null || ! grep -q 'IS_SANDBOX' "$SHELL_RC" 2>/dev/null; then
+  if is_fish_rc "$SHELL_RC"; then
+    echo 'set -gx IS_SANDBOX 1  # cc-switch' >> "$SHELL_RC"
+  else
+    echo 'export IS_SANDBOX=1  # cc-switch' >> "$SHELL_RC"
+  fi
 fi
 export IS_SANDBOX=1  # 当前会话也立即生效
 
