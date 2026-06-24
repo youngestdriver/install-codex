@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 确保 HOME 始终有值（某些 LXC 容器环境中 HOME 可能未设置）
+if [[ -z "${HOME:-}" ]]; then
+  HOME="$(getent passwd "$(id -u)" | cut -d: -f6)"
+  if [[ -z "$HOME" ]]; then
+    echo "错误：无法确定 HOME 目录。" >&2
+    exit 1
+  fi
+  export HOME
+fi
+
 SKIP_CONFIG=false
 WEBDAV_IMPORT=false
 
@@ -28,6 +38,24 @@ detect_shell_rc() {
 
 is_fish_rc() {
   [[ "$1" == *"/fish/config.fish" ]]
+}
+
+# 同时写入 ~/.profile，确保 login shell 也能加载 cc-switch 相关环境变量
+# （部分 LXC 容器的 ~/.profile 不 chain 到 ~/.bashrc）
+write_profile_guard() {
+  local profile="$HOME/.profile"
+  # 只有 bash 用户才需要这个兜底，且 profile 不存在时不创建
+  if is_fish_rc "$SHELL_RC"; then
+    return 0
+  fi
+  if [[ ! -f "$profile" ]]; then
+    return 0
+  fi
+  if grep -q '# cc-switch' "$profile" 2>/dev/null; then
+    return 0
+  fi
+  echo 'export PATH="$HOME/.local/bin:$PATH"  # cc-switch' >> "$profile"
+  echo 'export IS_SANDBOX=1  # cc-switch' >> "$profile"
 }
 
 if [[ "${1:-}" == "--uninstall" ]]; then
@@ -90,6 +118,13 @@ if [[ "${1:-}" == "--uninstall" ]]; then
   if [[ -n "$SHELL_RC" ]] && [[ -f "$SHELL_RC" ]]; then
     echo "清理 $SHELL_RC 中的相关条目 ..."
     sed -i '/# cc-switch/d' "$SHELL_RC"
+    echo "  已清理。"
+  fi
+
+  # 也清理 ~/.profile 中的兜底条目
+  if [[ -f "$HOME/.profile" ]]; then
+    echo "清理 $HOME/.profile 中的相关条目 ..."
+    sed -i '/# cc-switch/d' "$HOME/.profile"
     echo "  已清理。"
   fi
 
@@ -283,6 +318,9 @@ if ! grep -q '# cc-switch' "$SHELL_RC" 2>/dev/null || ! grep -q 'IS_SANDBOX' "$S
   fi
 fi
 export IS_SANDBOX=1  # 当前会话也立即生效
+
+# 兜底：确保 login shell 也能获得环境变量（LXC 容器中 ~/.profile 可能不 source ~/.bashrc）
+write_profile_guard
 
 if [[ "$WEBDAV_IMPORT" == "true" ]]; then
   echo "从 WebDAV 导入配置 ..."
