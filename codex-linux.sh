@@ -330,20 +330,26 @@ install_npm_pkg @openai/codex
 install_npm_pkg @anthropic-ai/claude-code
 
 echo "安装 cc-switch-cli (SaladDay) ..."
-if ! command_exists cc-switch; then
+# 检查二进制文件是否存在，而非检查 PATH（避免 PATH 未包含 ~/.local/bin 时重复安装）
+if [[ ! -x "$HOME/.local/bin/cc-switch" ]]; then
   export CC_SWITCH_FORCE=1
   curl -fsSL https://github.com/SaladDay/cc-switch-cli/releases/latest/download/install.sh | bash
   # 确保 cc-switch 在当前会话中可用
   export PATH="$HOME/.local/bin:$PATH"
-  if is_fish_rc "$SHELL_RC"; then
-    echo 'set -gx PATH "$HOME/.local/bin" $PATH  # cc-switch' >> "$SHELL_RC"
-  else
-    echo 'export PATH="$HOME/.local/bin:$PATH"  # cc-switch' >> "$SHELL_RC"
+  if ! grep -q '# cc-switch' "$SHELL_RC" 2>/dev/null; then
+    if is_fish_rc "$SHELL_RC"; then
+      echo 'set -gx PATH "$HOME/.local/bin" $PATH  # cc-switch' >> "$SHELL_RC"
+    else
+      echo 'export PATH="$HOME/.local/bin:$PATH"  # cc-switch' >> "$SHELL_RC"
+    fi
   fi
+else
+  # 二进制已安装但 PATH 可能缺 ~/.local/bin，补上
+  export PATH="$HOME/.local/bin:$PATH"
 fi
 
 # 将 IS_SANDBOX=1 尽早写入，避免后续任何步骤失败导致遗漏
-if ! grep -q '# cc-switch' "$SHELL_RC" 2>/dev/null || ! grep -q 'IS_SANDBOX' "$SHELL_RC" 2>/dev/null; then
+if ! grep -q 'IS_SANDBOX=1' "$SHELL_RC" 2>/dev/null; then
   if is_fish_rc "$SHELL_RC"; then
     echo 'set -gx IS_SANDBOX 1  # cc-switch' >> "$SHELL_RC"
   else
