@@ -40,22 +40,53 @@ is_fish_rc() {
   [[ "$1" == *"/fish/config.fish" ]]
 }
 
-# 同时写入 ~/.profile，确保 login shell 也能加载 cc-switch 相关环境变量
-# （部分 LXC 容器的 ~/.profile 不 chain 到 ~/.bashrc）
+# 确保 login shell 也能加载 cc-switch 相关环境变量。
+# Bash login shell 的加载顺序：~/.bash_profile -> ~/.bash_login -> ~/.profile（取第一个存在的）
+# 而 ~/.bashrc 仅对 non-login interactive shell 生效。
+# 在 LXC 容器中通过 pct enter / SSH 登录都是 login shell，可能完全不 source ~/.bashrc。
 write_profile_guard() {
-  local profile="$HOME/.profile"
-  # 只有 bash 用户才需要这个兜底，且 profile 不存在时不创建
+  # 只有 bash 用户需要这个兜底
   if is_fish_rc "$SHELL_RC"; then
     return 0
   fi
-  if [[ ! -f "$profile" ]]; then
+
+  local bash_profile="$HOME/.bash_profile"
+  local profile="$HOME/.profile"
+
+  # 1) 如果 ~/.bash_profile 已存在，追加到其中
+  if [[ -f "$bash_profile" ]]; then
+    if ! grep -q '# cc-switch' "$bash_profile" 2>/dev/null; then
+      echo 'export PATH="$HOME/.local/bin:$PATH"  # cc-switch' >> "$bash_profile"
+      echo 'export IS_SANDBOX=1  # cc-switch' >> "$bash_profile"
+    fi
     return 0
   fi
-  if grep -q '# cc-switch' "$profile" 2>/dev/null; then
+
+  # 2) 如果 ~/.profile 已存在，追加到其中
+  if [[ -f "$profile" ]]; then
+    if ! grep -q '# cc-switch' "$profile" 2>/dev/null; then
+      echo 'export PATH="$HOME/.local/bin:$PATH"  # cc-switch' >> "$profile"
+      echo 'export IS_SANDBOX=1  # cc-switch' >> "$profile"
+    fi
     return 0
   fi
-  echo 'export PATH="$HOME/.local/bin:$PATH"  # cc-switch' >> "$profile"
-  echo 'export IS_SANDBOX=1  # cc-switch' >> "$profile"
+
+  # 3) 两者都不存在（极端情况：最小化 LXC 容器）：创建 ~/.bash_profile
+  #    使其 source ~/.bashrc 和 ~/.profile（如果将来创建），并写入环境变量
+  cat > "$bash_profile" <<'PROFILE_EOF'
+# ~/.bash_profile — created by codex installer (cc-switch)
+
+if [ -f "$HOME/.bashrc" ]; then
+    . "$HOME/.bashrc"
+fi
+
+if [ -f "$HOME/.profile" ]; then
+    . "$HOME/.profile"
+fi
+
+export PATH="$HOME/.local/bin:$PATH"  # cc-switch
+export IS_SANDBOX=1  # cc-switch
+PROFILE_EOF
 }
 
 if [[ "${1:-}" == "--uninstall" ]]; then
@@ -121,12 +152,14 @@ if [[ "${1:-}" == "--uninstall" ]]; then
     echo "  已清理。"
   fi
 
-  # 也清理 ~/.profile 中的兜底条目
-  if [[ -f "$HOME/.profile" ]]; then
-    echo "清理 $HOME/.profile 中的相关条目 ..."
-    sed -i '/# cc-switch/d' "$HOME/.profile"
-    echo "  已清理。"
-  fi
+  # 也清理 ~/.profile 和 ~/.bash_profile 中的兜底条目
+  for f in "$HOME/.profile" "$HOME/.bash_profile"; do
+    if [[ -f "$f" ]]; then
+      echo "清理 $f 中的相关条目 ..."
+      sed -i '/# cc-switch/d' "$f"
+      echo "  已清理。"
+    fi
+  done
 
   echo
   echo "卸载完成。"
