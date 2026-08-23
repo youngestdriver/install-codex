@@ -77,8 +77,12 @@ NVM_EOF
 }
 
 # npm 执行封装：nvm 场景用户级运行，否则 sudo 运行
+# npm 执行封装：nvm 或用户级 npm 直接运行，系统级 npm 用 sudo
+# （注意：sudo 使用系统 secure_path，看不到 nvm/用户路径下的 npm，
+#  因此必须按 npm 全局安装位置来决定是否 sudo，而不是仅凭当前 PATH 可见）
 npm_run() {
-  if [[ "$NVM_NODE" == "true" ]]; then
+  if [[ "$NVM_NODE" == "true" ]] \
+    || { command_exists npm && [[ "$(npm prefix -g 2>/dev/null)" == "$HOME"/* ]]; }; then
     npm "$@"
   else
     run_as_root npm "$@"
