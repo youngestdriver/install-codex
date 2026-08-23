@@ -11,28 +11,28 @@ curl -sSL -o install.sh https://raw.githubusercontent.com/youngestdriver/install
 bash install.sh
 ```
 
-脚本会自动识别当前 Linux 发行版，并按系统使用对应的包管理器安装依赖：
+依赖安装策略：
 
-- Ubuntu / Debian 使用 `apt`
-- Arch Linux 使用 `pacman`
-- CentOS / RHEL 兼容系统使用 `dnf` 或 `yum`
+- **Node.js** — 已有 npm 且 Node ≥ 22 时直接用现有环境；否则通过 [nvm](https://github.com/nvm-sh/nvm) 安装 Node 24 LTS（用户级，无需 root）
+- **bubblewrap** — 按发行版使用对应包管理器（Ubuntu/Debian 用 `apt`，Arch Linux 用 `pacman`，CentOS/RHEL 兼容系统用 `dnf` 或 `yum`）
 
-运行后首先询问是否跳过配置，选择否后会交互式输入：
+运行后交互式询问配置方式（`[y/N]` 默认均为 `N`，直接回车即选 `N`）：
 
-- `OpenAI API Key` — 用于 Codex
-- `Base URL`（默认：`https://right.codes/codex/v1`）— 用于 Codex
-- `DeepSeek API Key` — 用于 Claude Code（通过 DeepSeek 的 Anthropic 兼容 API）
+1. `跳过配置 API Key 和 URL？` — 选择跳过则直接安装
+2. 否则询问 `从 WebDAV 导入 cc-switch 配置？`：
+   - 选择导入 → 读取 WebDAV 凭据，从云端拉取 cc-switch 配置并应用到应用目录
+   - 选择不导入 → 等同跳过配置，直接安装（配置由 cc-switch 自行管理）
 
 ## 选项
 
 ```bash
-bash install.sh --skip-config   # 跳过 API Key 和 URL 设置，仅安装工具
+bash install.sh --skip-config   # 跳过所有配置询问，仅安装工具
 bash install.sh --uninstall     # 卸载所有工具和配置文件
 ```
 
 ## 安装内容
 
-- **Codex** — `@openai/codex` 全局 npm 安装，并生成 `~/.codex/auth.json` 和 `~/.codex/config.toml`
+- **Codex** — `@openai/codex` 全局 npm 安装（凭据配置通过 cc-switch / WebDAV 导入）
 - **Claude Code** — `@anthropic-ai/claude-code` 全局 npm 安装
 - **cc-switch-cli** — 用于管理 Claude Code / Codex 等工具的 provider 切换
 
@@ -50,4 +50,4 @@ codex       # 启动 Codex
 bash install.sh --uninstall
 ```
 
-将删除：npm 全局包（codex、claude-code）、cc-switch-cli、`~/.codex`、`~/.claude/settings.json`，以及 shell rc 中的相关条目。
+将删除：npm 全局包（codex、claude-code）、cc-switch-cli、`~/.codex`、`~/.claude/settings.json`，以及 shell rc 中的相关条目（`# cc-switch`、`# nvm`）。`~/.nvm` 本身保留，不会被删除。

@@ -11,8 +11,79 @@ if [[ -z "${HOME:-}" ]]; then
   export HOME
 fi
 
-SKIP_CONFIG=false
 WEBDAV_IMPORT=false
+NVM_NODE=false
+NVM_DIR="$HOME/.nvm"
+NVM_VERSION="v0.40.7"
+
+# 检测 npm 可用且 Node ≥ 22.0.0；满足则直接用现有环境，不装 nvm
+node_version_ok() {
+  command_exists npm || return 1
+  command_exists node || return 1
+  local major
+  major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null)" || return 1
+  [[ "$major" =~ ^[0-9]+$ ]] || return 1
+  (( major >= 22 ))
+}
+
+# 通过 nvm 安装 Node 24 LTS（无 npm 或 Node < 22 时的路径）
+install_nvm_node() {
+  echo "未检测到可用的 Node.js (>= 22)，通过 nvm 安装 Node 24 LTS ..."
+
+  # 1) 安装 nvm（tarball 方式，只需 curl + tar，不依赖 git）
+  if [[ ! -s "$NVM_DIR/nvm.sh" ]]; then
+    echo "安装 nvm ${NVM_VERSION} ..."
+    if ! command_exists curl; then
+      echo "错误: 安装 nvm 需要 curl。" >&2
+      exit 1
+    fi
+    mkdir -p "$NVM_DIR"
+    if ! curl -fsSL "https://github.com/nvm-sh/nvm/archive/refs/tags/${NVM_VERSION}.tar.gz" | \
+      tar -xz --strip-components=1 -C "$NVM_DIR"; then
+      echo "错误: nvm 安装失败，无法继续。" >&2
+      exit 1
+    fi
+  else
+    echo "检测到已有 nvm，跳过安装。"
+  fi
+
+  # 2) 加载 nvm（非交互 shell 中 nvm 默认不生效，必须显式 source）
+  export NVM_DIR
+  # shellcheck disable=SC1091
+  . "$NVM_DIR/nvm.sh"
+
+  # 3) 安装 Node 24 LTS 并设为默认
+  nvm install 24
+  nvm alias default 24 >/dev/null
+  echo "已激活 Node $(node -v)。"
+
+  # 4) 写入 nvm 加载段到 shell rc（幂等；'# nvm' 标记便于卸载时清理）
+  if [[ -n "$SHELL_RC" ]] && ! grep -q '# nvm' "$SHELL_RC" 2>/dev/null; then
+    if is_fish_rc "$SHELL_RC"; then
+      cat >> "$SHELL_RC" <<'NVM_EOF'
+set -gx NVM_DIR "$HOME/.nvm"  # nvm
+if test -s "$NVM_DIR/nvm.fish"  # nvm
+  source "$NVM_DIR/nvm.fish"  # nvm
+end  # nvm
+NVM_EOF
+    else
+      cat >> "$SHELL_RC" <<'NVM_EOF'
+export NVM_DIR="$HOME/.nvm"  # nvm
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"  # nvm
+NVM_EOF
+    fi
+    echo "已将 nvm 加载段写入 $SHELL_RC。"
+  fi
+}
+
+# npm 执行封装：nvm 场景用户级运行，否则 sudo 运行
+npm_run() {
+  if [[ "$NVM_NODE" == "true" ]]; then
+    npm "$@"
+  else
+    run_as_root npm "$@"
+  fi
+}
 
 command_exists() {
   command -v "$1" >/dev/null 2>&1
@@ -89,12 +160,50 @@ export IS_SANDBOX=1  # cc-switch
 PROFILE_EOF
 }
 
+### 用户交互 ###
+
+# 选择跳过配置则返回 0（[y/N] 默认 N：回车或非 y 均不跳过）
+ask_skip_config() {
+  read -rp "跳过配置 API Key 和 URL？[y/N]: " SKIP_ANSWER
+  [[ "$SKIP_ANSWER" =~ ^[Yy]$ ]]
+}
+
+# 选择 WebDAV 导入则返回 0，并读取凭据（[y/N] 默认 N：回车或非 y 均不导入）
+ask_webdav() {
+  read -rp "从 WebDAV 导入 cc-switch 配置？[y/N]: " WEBDAV_ANSWER
+  [[ "$WEBDAV_ANSWER" =~ ^[Yy]$ ]] || return 1
+  read -rp "WebDAV Base URL: " WEBDAV_URL
+  read -rp "WebDAV Username: " WEBDAV_USER
+  read -rsp "WebDAV Password: " WEBDAV_PASS
+  echo
+}
+
+# 选择卸载则返回 0（[y/N] 默认 N）
+confirm_uninstall() {
+  read -rp "确认卸载？将删除所有相关工具和配置文件 [y/N]: " CONFIRM
+  [[ "$CONFIRM" =~ ^[Yy]$ ]]
+}
+
+# 决定是否导入配置：
+#   --skip-config / 选择跳过 / 拒绝导入 → 直接安装（不导入配置）
+#   选择 WebDAV 导入 → WEBDAV_IMPORT=true，稍后从云端拉取并应用配置
+select_config_mode() {
+  if [[ "${1:-}" == "--skip-config" ]]; then
+    return
+  fi
+  if ask_skip_config; then
+    return
+  fi
+  if ask_webdav; then
+    WEBDAV_IMPORT=true
+  fi
+}
+
 if [[ "${1:-}" == "--uninstall" ]]; then
   echo "=== 卸载 Codex / Claude Code / cc-switch-cli ==="
   echo
 
-  read -rp "确认卸载？将删除所有相关工具和配置文件 [y/N]: " CONFIRM
-  if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+  if ! confirm_uninstall; then
     echo "已取消。"
     exit 0
   fi
@@ -126,7 +235,35 @@ if [[ "${1:-}" == "--uninstall" ]]; then
       fi
     done
   else
-    echo "npm 未找到，跳过 npm 包卸载。"
+    # 系统无 npm：包可能装在 nvm 里，尝试通过 nvm 卸载（用户级，无需 sudo）
+    echo "npm 未找到，尝试通过 nvm 卸载 ..."
+    if [[ -s "$HOME/.nvm/nvm.sh" ]]; then
+      export NVM_DIR="$HOME/.nvm"
+      # shellcheck disable=SC1091
+      . "$NVM_DIR/nvm.sh"
+      if nvm which default >/dev/null 2>&1; then
+        # use 失败不中止脚本：后续 npm 不可用时走 rm -rf 兜底
+        nvm use default >/dev/null 2>&1 || true
+        for pkg in "@openai/codex" "@anthropic-ai/claude-code"; do
+          echo "卸载 ${pkg} ..."
+          if ! npm uninstall -g "$pkg" 2>/dev/null; then
+            echo "  npm 卸载失败，直接删除文件 ..."
+            pkg_dir="$(npm root -g 2>/dev/null || true)/${pkg}"
+            if [[ -d "$pkg_dir" ]]; then
+              rm -rf "$pkg_dir"
+              echo "  已删除 ${pkg_dir}"
+            else
+              echo "  (跳过，未找到 ${pkg_dir})"
+            fi
+          fi
+        done
+      else
+        echo "  (nvm 中没有 default 版本，跳过)"
+      fi
+      unset NVM_DIR
+    else
+      echo "  (未找到 ~/.nvm，跳过)"
+    fi
   fi
 
   # 卸载 cc-switch-cli
@@ -148,7 +285,7 @@ if [[ "${1:-}" == "--uninstall" ]]; then
   SHELL_RC="$(detect_shell_rc)"
   if [[ -n "$SHELL_RC" ]] && [[ -f "$SHELL_RC" ]]; then
     echo "清理 $SHELL_RC 中的相关条目 ..."
-    sed -i '/# cc-switch/d' "$SHELL_RC"
+    sed -i -e '/# cc-switch/d' -e '/# nvm/d' "$SHELL_RC"
     echo "  已清理。"
   fi
 
@@ -156,7 +293,7 @@ if [[ "${1:-}" == "--uninstall" ]]; then
   for f in "$HOME/.profile" "$HOME/.bash_profile"; do
     if [[ -f "$f" ]]; then
       echo "清理 $f 中的相关条目 ..."
-      sed -i '/# cc-switch/d' "$f"
+      sed -i -e '/# cc-switch/d' -e '/# nvm/d' "$f"
       echo "  已清理。"
     fi
   done
@@ -166,28 +303,7 @@ if [[ "${1:-}" == "--uninstall" ]]; then
   exit 0
 fi
 
-if [[ "${1:-}" == "--skip-config" ]]; then
-  SKIP_CONFIG=true
-else
-  read -rp "跳过配置 API Key 和 URL？[y/N]: " SKIP_ANSWER
-  if [[ "$SKIP_ANSWER" =~ ^[Yy]$ ]]; then
-    SKIP_CONFIG=true
-  else
-    read -rp "从 WebDAV 导入配置？[y/N]: " WEBDAV_ANSWER
-    if [[ "$WEBDAV_ANSWER" =~ ^[Yy]$ ]]; then
-      WEBDAV_IMPORT=true
-      read -rp "WebDAV Base URL: " WEBDAV_URL
-      read -rp "WebDAV Username: " WEBDAV_USER
-      read -rsp "WebDAV Password: " WEBDAV_PASS
-      echo
-    fi
-  fi
-fi
-
-CODEX_DIR="$HOME/.codex"
-AUTH_FILE="$CODEX_DIR/auth.json"
-CONFIG_FILE="$CODEX_DIR/config.toml"
-DEFAULT_BASE_URL="https://right.codes/codex/v1"
+select_config_mode
 
 if [[ -r /etc/os-release ]]; then
   # shellcheck disable=SC1091
@@ -212,43 +328,6 @@ is_rhel_like() {
   [[ "$DISTRO_ID" == "centos" || "$DISTRO_ID" == "rhel" || "$DISTRO_ID" == "rocky" || "$DISTRO_ID" == "almalinux" || " $DISTRO_LIKE " == *" rhel "* || " $DISTRO_LIKE " == *" fedora "* ]]
 }
 
-install_nodejs() {
-  echo "未检测到 npm，开始安装 Node.js 22 ..."
-
-  if is_debian_like; then
-    echo "检测到 Debian/Ubuntu 系发行版。"
-    run_as_root apt update
-    curl -fsSL https://deb.nodesource.com/setup_22.x | run_as_root bash -
-    run_as_root apt install -y nodejs
-    return
-  fi
-
-  if is_arch_like; then
-    echo "检测到 Arch Linux 系发行版。"
-    run_as_root pacman -Sy --noconfirm nodejs npm
-    return
-  fi
-
-  if is_rhel_like; then
-    echo "检测到 CentOS/RHEL 系发行版。"
-    if command_exists dnf; then
-      run_as_root dnf install -y curl
-      curl -fsSL https://rpm.nodesource.com/setup_22.x | run_as_root bash -
-      run_as_root dnf install -y nodejs
-    elif command_exists yum; then
-      run_as_root yum install -y curl
-      curl -fsSL https://rpm.nodesource.com/setup_22.x | run_as_root bash -
-      run_as_root yum install -y nodejs
-    else
-      echo "错误：当前 CentOS/RHEL 系统中既没有 dnf，也没有 yum。"
-      exit 1
-    fi
-    return
-  fi
-
-  echo "错误：暂不支持当前 Linux 发行版：${DISTRO_ID:-unknown}。"
-  exit 1
-}
 
 install_bubblewrap() {
   echo "未检测到 bubblewrap，开始安装 ..."
@@ -282,29 +361,11 @@ install_bubblewrap() {
 
 SHELL_RC="$(detect_shell_rc)"
 
-if [[ "$SKIP_CONFIG" != "true" && "$WEBDAV_IMPORT" != "true" ]]; then
-  read -rsp "请输入 OpenAI API Key: " OPENAI_API_KEY
+# 已有 npm 且 Node ≥ 22 时直接用现有环境；否则用 nvm 安装 Node 24 LTS
+if ! node_version_ok; then
+  install_nvm_node
+  NVM_NODE=true
   echo
-
-  if [[ -z "${OPENAI_API_KEY}" ]]; then
-    echo "错误：API Key 不能为空。"
-    exit 1
-  fi
-
-  read -rp "请输入 Base URL [${DEFAULT_BASE_URL}]: " BASE_URL
-  BASE_URL="${BASE_URL:-$DEFAULT_BASE_URL}"
-
-  read -rsp "请输入 DeepSeek API Key (用于 Claude Code): " DEEPSEEK_API_KEY
-  echo
-
-  if [[ -z "${DEEPSEEK_API_KEY}" ]]; then
-    echo "错误：DeepSeek API Key 不能为空。"
-    exit 1
-  fi
-fi
-
-if ! command_exists npm; then
-  install_nodejs
 fi
 
 if ! command_exists bwrap; then
@@ -314,13 +375,18 @@ fi
 install_npm_pkg() {
   local pkg="$1" rc
   echo "安装 ${pkg} ..."
-  run_as_root npm install -g "$pkg" && return 0
+  npm_run install -g "$pkg" && return 0
   rc=$?
-  local pkg_dir="$(run_as_root npm root -g)/${pkg}"
+  local pkg_dir
+  pkg_dir="$(npm_run root -g)/${pkg}"
   if [[ -d "$pkg_dir" ]]; then
     echo "  npm install 失败 (exit ${rc})，可能是残留目录导致，清理后重试 ..."
-    run_as_root rm -rf "$pkg_dir"
-    run_as_root npm install -g "$pkg"
+    if [[ "$NVM_NODE" == "true" ]]; then
+      rm -rf "$pkg_dir"
+    else
+      run_as_root rm -rf "$pkg_dir"
+    fi
+    npm_run install -g "$pkg"
   else
     return $rc
   fi
@@ -387,74 +453,6 @@ if [[ "$WEBDAV_IMPORT" == "true" ]]; then
   else
     echo "警告: WebDAV 配置拉取失败，请检查网络连接和凭据后重试。"
   fi
-fi
-
-if [[ "$SKIP_CONFIG" != "true" && "$WEBDAV_IMPORT" != "true" ]]; then
-  echo "配置 Claude Code 使用 DeepSeek ..."
-  CLAUDE_DIR="$HOME/.claude"
-  mkdir -p "$CLAUDE_DIR"
-cat > "$CLAUDE_DIR/settings.json" <<EOF
-{
-  "env": {
-    "ANTHROPIC_AUTH_TOKEN": "${DEEPSEEK_API_KEY}",
-    "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
-    "ANTHROPIC_MODEL": "deepseek-v4-pro[1M]",
-    "ANTHROPIC_DEFAULT_MODEL": "deepseek-v4-pro[1M]",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-pro[1M]",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-v4-flash",
-    "ANTHROPIC_MODEL_SONNET": "deepseek-v4-pro[1M]",
-    "ANTHROPIC_REASONING_MODEL": "deepseek-v4-pro[1M]",
-    "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
-    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-    "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": "1",
-    "CLAUDE_CODE_EFFORT_LEVEL": "max"
-  },
-  "includeCoAuthoredBy": true,
-  "permissions": {
-    "defaultMode": "bypassPermissions"
-  },
-  "skipDangerousModePermissionPrompt": true
-}
-EOF
-chmod 700 "$CLAUDE_DIR"
-chmod 600 "$CLAUDE_DIR/settings.json"
-
-echo "创建配置目录 ..."
-mkdir -p "$CODEX_DIR"
-
-echo "写入 $AUTH_FILE ..."
-cat > "$AUTH_FILE" <<EOF
-{
-  "OPENAI_API_KEY": "${OPENAI_API_KEY}"
-}
-EOF
-
-echo "写入 $CONFIG_FILE ..."
-cat > "$CONFIG_FILE" <<EOF
-model_provider = "rightcode"
-model = "gpt-5.4"
-model_reasoning_effort = "high"
-network_access = "enabled"
-disable_response_storage = true
-windows_wsl_setup_acknowledged = true
-model_verbosity = "high"
-
-[model_providers.rightcode]
-name = "rightcode"
-base_url = "${BASE_URL}"
-wire_api = "responses"
-requires_openai_auth = true
-EOF
-
-chmod 700 "$CODEX_DIR"
-chmod 600 "$AUTH_FILE" "$CONFIG_FILE"
-
-echo
-echo "完成。已生成："
-echo "  - $AUTH_FILE"
-echo "  - $CONFIG_FILE"
-echo "  - $CLAUDE_DIR/settings.json"
-echo
 fi
 
 echo "已安装："
