@@ -102,12 +102,16 @@ run_as_root() {
 }
 
 detect_shell_rc() {
-  local shell_name
-  shell_name="$(basename "${SHELL:-/bin/bash}")"
+  local shell_name login_shell
+  # $SHELL 可能未设置或不反映真实登录 shell（sudo / cron / 管道执行等场景），
+  # 用 /etc/passwd 中的登录 shell 兜底
+  login_shell="$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f7)"
+  shell_name="$(basename "${SHELL:-$login_shell}")"
   case "$shell_name" in
     zsh)  echo "$HOME/.zshrc" ;;
     fish) echo "$HOME/.config/fish/config.fish" ;;
-    *)    echo "$HOME/.bashrc" ;;  # bash, sh, 以及其他默认使用 .bashrc
+    sh|dash|ash|ksh|mksh) echo "$HOME/.profile" ;;  # POSIX login shell 读 ~/.profile
+    *)    echo "$HOME/.bashrc" ;;  # bash 以及其他默认使用 .bashrc
   esac
 }
 
@@ -115,15 +119,37 @@ is_fish_rc() {
   [[ "$1" == *"/fish/config.fish" ]]
 }
 
+# 幂等地将 cc-switch 环境变量（PATH + IS_SANDBOX）写入指定 rc 文件。
+# 统一以 '# cc-switch' 标记去重（而不是匹配内容，避免 fish 语法差异导致重复追加），
+# 卸载时的 sed 清理也依赖该标记。
+# shellcheck disable=SC2016  # 注入的是字面量，供用户 shell 展开，不能使用双引号
+write_cc_env() {
+  local rc="$1"
+  if grep -q '# cc-switch' "$rc" 2>/dev/null; then
+    return 0
+  fi
+  if is_fish_rc "$rc"; then
+    {
+      echo 'set -gx PATH "$HOME/.local/bin" $PATH  # cc-switch'
+      echo 'set -gx IS_SANDBOX 1  # cc-switch'
+    } >> "$rc"
+  else
+    {
+      echo 'export PATH="$HOME/.local/bin:$PATH"  # cc-switch'
+      echo 'export IS_SANDBOX=1  # cc-switch'
+    } >> "$rc"
+  fi
+}
+
 # 确保 login shell 也能加载 cc-switch 相关环境变量。
 # Bash login shell 的加载顺序：~/.bash_profile -> ~/.bash_login -> ~/.profile（取第一个存在的）
 # 而 ~/.bashrc 仅对 non-login interactive shell 生效。
 # 在 LXC 容器中通过 pct enter / SSH 登录都是 login shell，可能完全不 source ~/.bashrc。
+# 其他 shell 无需兜底：zsh 登录会 source ~/.zshrc（非交互另写 ~/.zshenv 覆盖），
+# fish 启动总是读 config.fish，POSIX sh 登录读 ~/.profile（都已直接写入）。
 write_profile_guard() {
-  # 只有 bash 用户需要这个兜底
-  if is_fish_rc "$SHELL_RC"; then
-    return 0
-  fi
+  # 只有 bash 用户（rc 为 ~/.bashrc）需要这个兜底
+  [[ "$SHELL_RC" == "$HOME/.bashrc" ]] || return 0
 
   local bash_profile="$HOME/.bash_profile"
   local profile="$HOME/.profile"
@@ -131,6 +157,7 @@ write_profile_guard() {
   # 1) 如果 ~/.bash_profile 已存在，追加到其中
   if [[ -f "$bash_profile" ]]; then
     if ! grep -q '# cc-switch' "$bash_profile" 2>/dev/null; then
+      # shellcheck disable=SC2016  # 注入的是字面量，供用户 shell 展开
       echo 'export PATH="$HOME/.local/bin:$PATH"  # cc-switch' >> "$bash_profile"
       echo 'export IS_SANDBOX=1  # cc-switch' >> "$bash_profile"
     fi
@@ -140,6 +167,7 @@ write_profile_guard() {
   # 2) 如果 ~/.profile 已存在，追加到其中
   if [[ -f "$profile" ]]; then
     if ! grep -q '# cc-switch' "$profile" 2>/dev/null; then
+      # shellcheck disable=SC2016  # 注入的是字面量，供用户 shell 展开
       echo 'export PATH="$HOME/.local/bin:$PATH"  # cc-switch' >> "$profile"
       echo 'export IS_SANDBOX=1  # cc-switch' >> "$profile"
     fi
@@ -293,8 +321,8 @@ if [[ "${1:-}" == "--uninstall" ]]; then
     echo "  已清理。"
   fi
 
-  # 也清理 ~/.profile 和 ~/.bash_profile 中的兜底条目
-  for f in "$HOME/.profile" "$HOME/.bash_profile"; do
+  # 也清理 ~/.profile、~/.bash_profile 和 ~/.zshenv 中的兜底条目
+  for f in "$HOME/.profile" "$HOME/.bash_profile" "$HOME/.zshenv"; do
     if [[ -f "$f" ]]; then
       echo "清理 $f 中的相关条目 ..."
       sed -i -e '/# cc-switch/d' -e '/# nvm/d' "$f"
@@ -404,27 +432,14 @@ echo "安装 cc-switch-cli (SaladDay) ..."
 if [[ ! -x "$HOME/.local/bin/cc-switch" ]]; then
   export CC_SWITCH_FORCE=1
   curl -fsSL https://github.com/SaladDay/cc-switch-cli/releases/latest/download/install.sh | bash
-  # 确保 cc-switch 在当前会话中可用
-  export PATH="$HOME/.local/bin:$PATH"
-  if ! grep -q '# cc-switch' "$SHELL_RC" 2>/dev/null; then
-    if is_fish_rc "$SHELL_RC"; then
-      echo 'set -gx PATH "$HOME/.local/bin" $PATH  # cc-switch' >> "$SHELL_RC"
-    else
-      echo 'export PATH="$HOME/.local/bin:$PATH"  # cc-switch' >> "$SHELL_RC"
-    fi
-  fi
-else
-  # 二进制已安装但 PATH 可能缺 ~/.local/bin，补上
-  export PATH="$HOME/.local/bin:$PATH"
 fi
-
-# 将 IS_SANDBOX=1 尽早写入，避免后续任何步骤失败导致遗漏
-if ! grep -q 'IS_SANDBOX=1' "$SHELL_RC" 2>/dev/null; then
-  if is_fish_rc "$SHELL_RC"; then
-    echo 'set -gx IS_SANDBOX 1  # cc-switch' >> "$SHELL_RC"
-  else
-    echo 'export IS_SANDBOX=1  # cc-switch' >> "$SHELL_RC"
-  fi
+# 确保 cc-switch 在当前会话中可用
+export PATH="$HOME/.local/bin:$PATH"
+# 将 PATH 和 IS_SANDBOX 尽早写入 rc（幂等），避免后续步骤失败导致遗漏
+write_cc_env "$SHELL_RC"
+# zsh 的非交互调用（脚本、cron）不读 .zshrc，另写 .zshenv（任何 zsh 进程都会读取）
+if [[ "$SHELL_RC" == "$HOME/.zshrc" ]]; then
+  write_cc_env "$HOME/.zshenv"
 fi
 export IS_SANDBOX=1  # 当前会话也立即生效
 
