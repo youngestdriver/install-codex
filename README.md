@@ -23,6 +23,33 @@ bash install.sh
    - 选择导入 → 读取 WebDAV 凭据，从云端拉取 cc-switch 配置并应用到应用目录
    - 选择不导入 → 等同跳过配置，直接安装（配置由 cc-switch 自行管理）
 
+### macOS（手动安装）
+
+`codex-linux.sh` 仅支持 Linux（依赖 `/etc/os-release`、apt/pacman/dnf、bubblewrap），macOS 上按以下步骤手动安装：
+
+```bash
+# 1. Node
+brew install node
+
+# 2. Codex / Claude Code（官方安装器）
+curl -fsSL https://claude.ai/install.sh | bash
+curl -fsSL https://chatgpt.com/codex/install.sh | sh
+
+# 3. cc-switch-cli（官方 install.sh 已支持 Darwin）
+curl -fsSL https://github.com/SaladDay/cc-switch-cli/releases/latest/download/install.sh | bash
+```
+
+**环境变量必须写入 `~/.zshenv`**（macOS 上只写 `~/.zshrc` 不生效；`~/.zshenv` 对所有 zsh 进程生效，含非交互调用）：
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"  # cc-switch' >> ~/.zshenv
+echo 'export IS_SANDBOX=1  # cc-switch' >> ~/.zshenv
+source ~/.zshenv
+printenv IS_SANDBOX   # 验证输出 1
+```
+
+`# cc-switch` 标记与 Linux 脚本保持一致，便于统一清理。
+
 ## 选项
 
 ```bash
