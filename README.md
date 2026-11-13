@@ -11,7 +11,9 @@ curl -sSL -o install.sh https://raw.githubusercontent.com/youngestdriver/install
 bash install.sh
 ```
 
-运行后会弹出交互式多选界面（支持 `↑/↓` 或 `j/k` 移动、`空格` 切换 `[*]`/`[ ]`、`a` 全选/全不选、`Enter` 确认、`q` 退出），**默认预勾选 `claude`、`codex`、`cc-switch`**：
+运行前会先询问**是否需要配置系统代理**（`[y/N]` 默认 `N`；选 `y` 时优先从 `https://url.qzh.su/proxy` 拉取 [proxy-init](https://github.com/youngestdriver/proxy-init) 并在失败时回退至 GitHub raw，通过临时文件执行并在完成后自动使 `/etc/profile.d/90-proxy.sh` 在当前安装流程中生效；若传入 `--harness` 且未指定 `--proxy` 则跳过询问）。
+
+随后弹出交互式多选界面（支持 `↑/↓` 或 `j/k` 移动、`空格` 切换 `[*]`/`[ ]`、`a` 全选/全不选、`Enter` 确认、`q` 退出），**默认预勾选 `claude`、`codex`、`cc-switch`**：
 
 1. `claude` — Claude Code (`@anthropic-ai/claude-code`)
 2. `codex` — OpenAI Codex (`@openai/codex`)
@@ -64,6 +66,7 @@ printenv IS_SANDBOX   # 验证输出 1
 ## 选项
 
 ```bash
+bash install.sh --proxy 127.0.0.1:7890                # 安装前非交互配置系统代理（支持 http/socks5）
 bash install.sh --harness claude,codex,dsh,cc-switch  # 非交互指定要安装的工具（支持 all）
 bash install.sh --skip-config                         # 跳过 WebDAV 配置询问，仅安装工具
 bash install.sh --uninstall                           # 交互多选卸载已安装工具（也可配合 --harness）
@@ -90,4 +93,4 @@ pi          # 启动 Pi Coding Agent
 bash install.sh --uninstall
 ```
 
-卸载时会先自动检测本机已安装的工具并弹出 `[*]` 方向键多选列表（已安装项默认预勾选），确认后仅移除所选工具及其对应配置；若不再保留 `cc-switch` / `agy` 或 npm 工具，也会按需清理 shell rc 中的 `# cc-switch`、`# local-bin`、`# nvm` 条目（`~/.nvm` 与 `~/.gemini/antigravity-cli` 本身保留，不会被删除）。
+卸载时会先自动检测本机已安装的工具并弹出 `[*]` 方向键多选列表（已安装项默认预勾选），确认后仅移除所选工具及其对应配置；若不再保留 `cc-switch` / `agy` 或 npm 工具，也会按需清理 shell rc 中的 `# cc-switch`、`# local-bin`、`# nvm` 条目（`~/.nvm`、`~/.gemini/antigravity-cli` 及系统级 `proxy-init` 配置保留，不会被删除；如需撤销代理可单独运行 `proxy-init.sh --uninstall`）。

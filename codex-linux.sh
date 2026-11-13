@@ -15,6 +15,10 @@ ACTION="install"
 SKIP_CONFIG=false
 WEBDAV_IMPORT=false
 HARNESS_ARG=""
+PROXY_ARG=""
+PROXY_INIT_URL="${PROXY_INIT_URL:-https://url.qzh.su/proxy}"
+PROXY_INIT_FALLBACK_URL="${PROXY_INIT_FALLBACK_URL:-https://raw.githubusercontent.com/youngestdriver/proxy-init/main/proxy-init.sh}"
+PROXY_ENV_FILE="${PROXY_ENV_FILE:-/etc/profile.d/90-proxy.sh}"
 
 NVM_NODE=false
 NVM_DIR="$HOME/.nvm"
@@ -143,6 +147,7 @@ show_usage() {
                       可选: claude, codex, dsh, agy, grok, gemini, opencode, pi, cc-switch
                       示例: --harness claude,codex,dsh,cc-switch
                             --harness all
+  --proxy <地址>      安装前调用 proxy-init 配置系统代理（如 127.0.0.1:7890）
   --skip-config       跳过 WebDAV 配置询问，仅安装工具
   --uninstall         进入卸载模式（可交互多选或配合 --harness 指定）
   -h, --help          显示此帮助信息
@@ -157,6 +162,24 @@ parse_args() {
         ;;
       --skip-config)
         SKIP_CONFIG=true
+        ;;
+      --proxy)
+        if [[ -z "${2:-}" ]]; then
+          echo "错误: $1 需要指定代理地址。" >&2
+          show_usage >&2
+          exit 1
+        fi
+        PROXY_ARG="$2"
+        shift
+        ;;
+      --proxy=*)
+        local pval="${1#*=}"
+        if [[ -z "$pval" ]]; then
+          echo "错误: ${1%%=*} 需要指定代理地址。" >&2
+          show_usage >&2
+          exit 1
+        fi
+        PROXY_ARG="$pval"
         ;;
       --harness|--harnesses)
         if [[ -z "${2:-}" ]]; then
@@ -842,6 +865,9 @@ run_uninstall() {
   done
 
   echo
+  if [[ -r "$PROXY_ENV_FILE" ]]; then
+    echo "注：系统代理配置（${PROXY_ENV_FILE}）已保留；如需撤销可运行 proxy-init.sh --uninstall。"
+  fi
   echo "卸载完成。"
   exit 0
 }
@@ -1015,12 +1041,114 @@ print_summary() {
   fi
 }
 
+# 从短链优先拉取 proxy-init.sh，失败时回退到 GitHub raw
+download_proxy_init() {
+  local dest="$1"
+  echo "正在拉取 proxy-init.sh (${PROXY_INIT_URL}) ..."
+  if curl -fsSL --connect-timeout 10 "$PROXY_INIT_URL" -o "$dest"; then
+    return 0
+  fi
+  echo "短链拉取失败，尝试从 GitHub 回退地址拉取 ..." >&2
+  curl -fsSL --connect-timeout 15 "$PROXY_INIT_FALLBACK_URL" -o "$dest"
+}
+
+run_proxy_init_script() {
+  local script_path="$1"
+  shift
+  if has_tty; then
+    run_as_root bash "$script_path" "$@" </dev/tty
+  else
+    run_as_root bash "$script_path" "$@" </dev/null
+  fi
+}
+
+# 安装前按需调用 proxy-init 配置系统代理，并立即导入当前进程环境
+configure_proxy_before_install() {
+  local ans="" existing_proxy=""
+  if [[ -z "$PROXY_ARG" ]]; then
+    if [[ -n "$HARNESS_ARG" ]] || ! has_tty; then
+      return 0
+    fi
+    if [[ -r "$PROXY_ENV_FILE" ]]; then
+      existing_proxy="$(sed -n 's/^PROXY_URL="\(.*\)"/\1/p' "$PROXY_ENV_FILE" 2>/dev/null | head -1 || true)"
+    fi
+    if [[ -n "$existing_proxy" ]]; then
+      read -rp "检测到已有系统代理 (${existing_proxy})，是否重新配置？[y/N]: " ans </dev/tty
+    else
+      read -rp "是否需要在安装前配置系统代理 (proxy-init)？[y/N]: " ans </dev/tty
+    fi
+    if [[ ! "$ans" =~ ^[Yy]$ ]]; then
+      return 0
+    fi
+    echo
+  fi
+
+  ensure_curl
+
+  local tmp_proxy
+  tmp_proxy="$(mktemp "${TMPDIR:-/tmp}/proxy-init.XXXXXX.sh")"
+  if ! download_proxy_init "$tmp_proxy"; then
+    rm -f "$tmp_proxy"
+    echo "错误: 无法拉取 proxy-init.sh。" >&2
+    if [[ -n "$PROXY_ARG" ]] || ! has_tty; then
+      exit 1
+    fi
+    read -rp "是否跳过代理配置继续安装？[y/N]: " ans </dev/tty
+    [[ "$ans" =~ ^[Yy]$ ]] && return 0
+    exit 1
+  fi
+
+  local proxy_args=()
+  if [[ ! -d /etc/apt/apt.conf.d ]]; then
+    proxy_args+=(--no-apt)
+  fi
+  if [[ -n "$PROXY_ARG" ]]; then
+    proxy_args+=(--proxy "$PROXY_ARG")
+  fi
+
+  local ok=false
+  while true; do
+    if run_proxy_init_script "$tmp_proxy" "${proxy_args[@]}"; then
+      ok=true
+      break
+    fi
+    if [[ -n "$PROXY_ARG" ]] || ! has_tty; then
+      break
+    fi
+    read -rp "代理配置未成功，是否重试？[y/N]: " ans </dev/tty
+    if [[ "$ans" =~ ^[Yy]$ ]]; then
+      continue
+    fi
+    read -rp "是否跳过代理配置继续安装？[y/N]: " ans </dev/tty
+    if [[ "$ans" =~ ^[Yy]$ ]]; then
+      rm -f "$tmp_proxy"
+      return 0
+    fi
+    rm -f "$tmp_proxy"
+    exit 1
+  done
+
+  rm -f "$tmp_proxy"
+  if [[ "$ok" != "true" ]]; then
+    echo "错误: 系统代理配置失败。" >&2
+    exit 1
+  fi
+
+  if [[ -r "$PROXY_ENV_FILE" ]]; then
+    # shellcheck disable=SC1090
+    . "$PROXY_ENV_FILE"
+  fi
+  echo
+}
+
 main() {
   parse_args "$@"
 
   if [[ "$ACTION" == "uninstall" ]]; then
     run_uninstall
   fi
+
+  configure_proxy_before_install
 
   select_tools_for_install
   select_config_mode
