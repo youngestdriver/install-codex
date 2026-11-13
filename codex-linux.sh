@@ -11,32 +11,302 @@ if [[ -z "${HOME:-}" ]]; then
   export HOME
 fi
 
+ACTION="install"
+SKIP_CONFIG=false
 WEBDAV_IMPORT=false
+HARNESS_ARG=""
+
 NVM_NODE=false
 NVM_DIR="$HOME/.nvm"
 NVM_VERSION="v0.40.7"
 
-# 检测 npm 可用且 Node ≥ 22.0.0；满足则直接用现有环境，不装 nvm
-node_version_ok() {
-  command_exists npm || return 1
-  command_exists node || return 1
-  local major
-  major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null)" || return 1
-  [[ "$major" =~ ^[0-9]+$ ]] || return 1
-  (( major >= 22 ))
+# 受管工具注册表（保持固定顺序；新增工具只需在此表与对应处理器登记）
+TOOL_IDS=(
+  "claude"
+  "codex"
+  "dsh"
+  "agy"
+  "grok"
+  "gemini"
+  "opencode"
+  "pi"
+  "cc-switch"
+)
+TOOL_LABELS=(
+  "Claude Code       (@anthropic-ai/claude-code · cc-switch 支持)"
+  "OpenAI Codex      (@openai/codex · cc-switch 支持)"
+  "DeepSeek Harness  (@deepseek-ai/dsh · 需 Node >= 24.9.0)"
+  "Antigravity CLI   (agy 官方二进制)"
+  "Grok Build        (@xai-official/grok)"
+  "Gemini CLI        (@google/gemini-cli · cc-switch 支持)"
+  "OpenCode          (opencode-ai · cc-switch 支持)"
+  "Pi Coding Agent   (@earendil-works/pi-coding-agent · cc-switch 支持)"
+  "CC-Switch CLI     (provider 切换与 WebDAV 同步工具)"
+)
+# npm 包名；非 npm 工具留空
+TOOL_PKGS=(
+  "@anthropic-ai/claude-code"
+  "@openai/codex"
+  "@deepseek-ai/dsh"
+  ""
+  "@xai-official/grok"
+  "@google/gemini-cli"
+  "opencode-ai"
+  "@earendil-works/pi-coding-agent"
+  ""
+)
+# 主命令名（用于卸载清理软链与检测）
+TOOL_BINS=(
+  "claude"
+  "codex"
+  "dsh"
+  "agy"
+  "grok"
+  "gemini"
+  "opencode"
+  "pi"
+  "cc-switch"
+)
+# 最低 Node 主/次版本号（非 npm 工具为 0 0）
+TOOL_MIN_NODE_MAJOR=(22 22 24 0 22 22 22 22 0)
+TOOL_MIN_NODE_MINOR=(0  0  9  0 0  0  19 19 0)
+
+# 默认安装勾选：claude、codex、cc-switch
+TOOL_SELECTED=(1 1 0 0 0 0 0 0 1)
+TOOL_INSTALLED=(0 0 0 0 0 0 0 0 0)
+
+command_exists() {
+  command -v "$1" >/dev/null 2>&1
 }
 
-# 通过 nvm 安装 Node 24 LTS（无 npm 或 Node < 22 时的路径）
-install_nvm_node() {
-  echo "未检测到可用的 Node.js (>= 22)，通过 nvm 安装 Node 24 LTS ..."
+run_as_root() {
+  if command_exists sudo; then
+    sudo "$@"
+  else
+    "$@"
+  fi
+}
 
-  # 1) 安装 nvm（tarball 方式，只需 curl + tar，不依赖 git）
+tool_index() {
+  local target="$1" i
+  for i in "${!TOOL_IDS[@]}"; do
+    if [[ "${TOOL_IDS[$i]}" == "$target" ]]; then
+      echo "$i"
+      return 0
+    fi
+  done
+  return 1
+}
+
+is_selected() {
+  local idx
+  idx="$(tool_index "$1")" || return 1
+  [[ "${TOOL_SELECTED[$idx]}" == "1" ]]
+}
+
+set_selected() {
+  local idx
+  idx="$(tool_index "$1")" || return 1
+  TOOL_SELECTED[$idx]="$2"
+}
+
+reset_selection() {
+  local i
+  for i in "${!TOOL_IDS[@]}"; do
+    TOOL_SELECTED[$i]=0
+  done
+}
+
+select_all_tools() {
+  local i
+  for i in "${!TOOL_IDS[@]}"; do
+    TOOL_SELECTED[$i]=1
+  done
+}
+
+selected_count() {
+  local count=0 i
+  for i in "${!TOOL_IDS[@]}"; do
+    if [[ "${TOOL_SELECTED[$i]}" == "1" ]]; then
+      count=$((count + 1))
+    fi
+  done
+  echo "$count"
+}
+
+show_usage() {
+  cat <<'EOF'
+用法: bash install.sh [选项]
+
+选项:
+  --harness <列表>    指定要安装/卸载的工具（逗号或空格分隔，或使用 all 全选）
+                      可选: claude, codex, dsh, agy, grok, gemini, opencode, pi, cc-switch
+                      示例: --harness claude,codex,dsh,cc-switch
+                            --harness all
+  --skip-config       跳过 WebDAV 配置询问，仅安装工具
+  --uninstall         进入卸载模式（可交互多选或配合 --harness 指定）
+  -h, --help          显示此帮助信息
+EOF
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --uninstall)
+        ACTION="uninstall"
+        ;;
+      --skip-config)
+        SKIP_CONFIG=true
+        ;;
+      --harness|--harnesses)
+        if [[ -z "${2:-}" ]]; then
+          echo "错误: $1 需要指定工具列表。" >&2
+          show_usage >&2
+          exit 1
+        fi
+        HARNESS_ARG="${HARNESS_ARG:+${HARNESS_ARG},}$2"
+        shift
+        ;;
+      --harness=*|--harnesses=*)
+        local val="${1#*=}"
+        if [[ -z "$val" ]]; then
+          echo "错误: ${1%%=*} 需要指定工具列表。" >&2
+          show_usage >&2
+          exit 1
+        fi
+        HARNESS_ARG="${HARNESS_ARG:+${HARNESS_ARG},}$val"
+        ;;
+      -h|--help)
+        show_usage
+        exit 0
+        ;;
+      *)
+        echo "错误: 未知参数 '$1'。" >&2
+        show_usage >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+}
+
+enable_tool_token() {
+  local token="${1,,}"
+  case "$token" in
+    1|claude|claude-code)             set_selected "claude" 1 ;;
+    2|codex)                          set_selected "codex" 1 ;;
+    3|dsh|deepseek|deepseek-harness)  set_selected "dsh" 1 ;;
+    4|agy|antigravity)                set_selected "agy" 1 ;;
+    5|grok|grok-build|grok_build)     set_selected "grok" 1 ;;
+    6|gemini|gemini-cli)              set_selected "gemini" 1 ;;
+    7|opencode|opencode-ai)           set_selected "opencode" 1 ;;
+    8|pi|pi-coding-agent)             set_selected "pi" 1 ;;
+    9|cc-switch|cc-switch-cli|cc)     set_selected "cc-switch" 1 ;;
+    all|a)                            select_all_tools ;;
+    *)                                return 1 ;;
+  esac
+}
+
+apply_tool_list() {
+  local raw="$1" token
+  local normalized="${raw//,/ }"
+  reset_selection
+
+  for token in $normalized; do
+    if ! enable_tool_token "$token"; then
+      echo "错误: 不支持的工具选项 '$token'。" >&2
+      return 1
+    fi
+  done
+
+  if (( $(selected_count) == 0 )); then
+    echo "错误: 请至少选择一项。" >&2
+    return 1
+  fi
+}
+
+needs_node() {
+  local i
+  for i in "${!TOOL_IDS[@]}"; do
+    if [[ "${TOOL_SELECTED[$i]}" == "1" && -n "${TOOL_PKGS[$i]}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# 计算所选 npm 工具中的最高 Node 版本门槛（major minor 输出到 stdout）
+required_node_version() {
+  local max_major=22 max_minor=0 i maj min
+  for i in "${!TOOL_IDS[@]}"; do
+    if [[ "${TOOL_SELECTED[$i]}" == "1" && -n "${TOOL_PKGS[$i]}" ]]; then
+      maj="${TOOL_MIN_NODE_MAJOR[$i]}"
+      min="${TOOL_MIN_NODE_MINOR[$i]}"
+      if (( maj > max_major || (maj == max_major && min > max_minor) )); then
+        max_major="$maj"
+        max_minor="$min"
+      fi
+    fi
+  done
+  echo "$max_major $max_minor"
+}
+
+needs_bwrap() {
+  is_selected "claude" || is_selected "codex"
+}
+
+needs_local_bin_path() {
+  is_selected "agy" || is_selected "cc-switch"
+}
+
+# 是否任一工具还需保留 nvm（卸载后判断是否可清理 # nvm）
+any_npm_tool_installed() {
+  local i pkg
+  for i in "${!TOOL_IDS[@]}"; do
+    pkg="${TOOL_PKGS[$i]}"
+    [[ -n "$pkg" ]] || continue
+    if is_pkg_installed "$pkg" "${TOOL_BINS[$i]}"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# 检测 npm 可用且 Node 版本 >= min_major.min_minor；满足则直接用现有环境，不装 nvm
+node_version_ok() {
+  local min_major="${1:-22}" min_minor="${2:-0}"
+  command_exists npm || return 1
+  command_exists node || return 1
+  local ver major minor
+  ver="$(node -p 'process.versions.node' 2>/dev/null)" || return 1
+  major="${ver%%.*}"
+  minor="${ver#*.}"
+  minor="${minor%%.*}"
+  [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] || return 1
+  (( major > min_major || (major == min_major && minor >= min_minor) ))
+}
+
+# 加载已存在的 nvm（供卸载检测或非交互环境复用）
+try_load_nvm() {
+  if [[ -s "$NVM_DIR/nvm.sh" ]]; then
+    export NVM_DIR
+    # shellcheck disable=SC1091
+    . "$NVM_DIR/nvm.sh"
+    if nvm which default >/dev/null 2>&1; then
+      nvm use default >/dev/null 2>&1 || true
+      return 0
+    fi
+  fi
+  return 1
+}
+
+# 通过 nvm 安装 Node 24 LTS（无 npm 或 Node 版本不满足要求时的路径）
+install_nvm_node() {
+  echo "未检测到满足版本要求的 Node.js，通过 nvm 安装 Node 24 LTS ..."
+
   if [[ ! -s "$NVM_DIR/nvm.sh" ]]; then
     echo "安装 nvm ${NVM_VERSION} ..."
-    if ! command_exists curl; then
-      echo "错误: 安装 nvm 需要 curl。" >&2
-      exit 1
-    fi
+    ensure_curl
     mkdir -p "$NVM_DIR"
     if ! curl -fsSL "https://github.com/nvm-sh/nvm/archive/refs/tags/${NVM_VERSION}.tar.gz" | \
       tar -xz --strip-components=1 -C "$NVM_DIR"; then
@@ -47,18 +317,16 @@ install_nvm_node() {
     echo "检测到已有 nvm，跳过安装。"
   fi
 
-  # 2) 加载 nvm（非交互 shell 中 nvm 默认不生效，必须显式 source）
   export NVM_DIR
   # shellcheck disable=SC1091
   . "$NVM_DIR/nvm.sh"
 
-  # 3) 安装 Node 24 LTS 并设为默认
   nvm install 24
   nvm alias default 24 >/dev/null
   echo "已激活 Node $(node -v)。"
 
-  # 4) 写入 nvm 加载段到 shell rc（幂等；'# nvm' 标记便于卸载时清理）
   if [[ -n "$SHELL_RC" ]] && ! grep -q '# nvm' "$SHELL_RC" 2>/dev/null; then
+    mkdir -p "$(dirname "$SHELL_RC")"
     if is_fish_rc "$SHELL_RC"; then
       cat >> "$SHELL_RC" <<'NVM_EOF'
 set -gx NVM_DIR "$HOME/.nvm"  # nvm
@@ -76,10 +344,7 @@ NVM_EOF
   fi
 }
 
-# npm 执行封装：nvm 场景用户级运行，否则 sudo 运行
 # npm 执行封装：nvm 或用户级 npm 直接运行，系统级 npm 用 sudo
-# （注意：sudo 使用系统 secure_path，看不到 nvm/用户路径下的 npm，
-#  因此必须按 npm 全局安装位置来决定是否 sudo，而不是仅凭当前 PATH 可见）
 npm_run() {
   if [[ "$NVM_NODE" == "true" ]] \
     || { command_exists npm && [[ "$(npm prefix -g 2>/dev/null)" == "$HOME"/* ]]; }; then
@@ -89,29 +354,15 @@ npm_run() {
   fi
 }
 
-command_exists() {
-  command -v "$1" >/dev/null 2>&1
-}
-
-run_as_root() {
-  if command_exists sudo; then
-    sudo "$@"
-  else
-    "$@"
-  fi
-}
-
 detect_shell_rc() {
   local shell_name login_shell
-  # $SHELL 可能未设置或不反映真实登录 shell（sudo / cron / 管道执行等场景），
-  # 用 /etc/passwd 中的登录 shell 兜底
   login_shell="$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f7)"
   shell_name="$(basename "${SHELL:-$login_shell}")"
   case "$shell_name" in
     zsh)  echo "$HOME/.zshrc" ;;
     fish) echo "$HOME/.config/fish/config.fish" ;;
-    sh|dash|ash|ksh|mksh) echo "$HOME/.profile" ;;  # POSIX login shell 读 ~/.profile
-    *)    echo "$HOME/.bashrc" ;;  # bash 以及其他默认使用 .bashrc
+    sh|dash|ash|ksh|mksh) echo "$HOME/.profile" ;;
+    *)    echo "$HOME/.bashrc" ;;
   esac
 }
 
@@ -119,65 +370,54 @@ is_fish_rc() {
   [[ "$1" == *"/fish/config.fish" ]]
 }
 
-# 幂等地将 cc-switch 环境变量（PATH + IS_SANDBOX）写入指定 rc 文件。
-# 统一以 '# cc-switch' 标记去重（而不是匹配内容，避免 fish 语法差异导致重复追加），
-# 卸载时的 sed 清理也依赖该标记。
-# shellcheck disable=SC2016  # 注入的是字面量，供用户 shell 展开，不能使用双引号
-write_cc_env() {
-  local rc="$1"
-  if grep -q '# cc-switch' "$rc" 2>/dev/null; then
+# 向指定 rc 文件幂等写入环境变量块：
+#   mode=cc-switch  写入 PATH + IS_SANDBOX=1（标记 '# cc-switch'）
+#   mode=local-bin  仅写入 ~/.local/bin PATH（标记 '# local-bin'）
+# shellcheck disable=SC2016
+write_env_block() {
+  local rc="$1" mode="${2:-cc-switch}"
+  local marker="# ${mode}"
+  if grep -q "$marker" "$rc" 2>/dev/null; then
     return 0
   fi
+  mkdir -p "$(dirname "$rc")"
   if is_fish_rc "$rc"; then
     {
-      echo 'set -gx PATH "$HOME/.local/bin" $PATH  # cc-switch'
-      echo 'set -gx IS_SANDBOX 1  # cc-switch'
+      echo "set -gx PATH \"\$HOME/.local/bin\" \$PATH  ${marker}"
+      if [[ "$mode" == "cc-switch" ]]; then
+        echo "set -gx IS_SANDBOX 1  ${marker}"
+      fi
     } >> "$rc"
   else
     {
-      echo 'export PATH="$HOME/.local/bin:$PATH"  # cc-switch'
-      echo 'export IS_SANDBOX=1  # cc-switch'
+      echo "export PATH=\"\$HOME/.local/bin:\$PATH\"  ${marker}"
+      if [[ "$mode" == "cc-switch" ]]; then
+        echo "export IS_SANDBOX=1  ${marker}"
+      fi
     } >> "$rc"
   fi
 }
 
-# 确保 login shell 也能加载 cc-switch 相关环境变量。
-# Bash login shell 的加载顺序：~/.bash_profile -> ~/.bash_login -> ~/.profile（取第一个存在的）
-# 而 ~/.bashrc 仅对 non-login interactive shell 生效。
-# 在 LXC 容器中通过 pct enter / SSH 登录都是 login shell，可能完全不 source ~/.bashrc。
-# 其他 shell 无需兜底：zsh 登录会 source ~/.zshrc（非交互另写 ~/.zshenv 覆盖），
-# fish 启动总是读 config.fish，POSIX sh 登录读 ~/.profile（都已直接写入）。
+# 确保 login shell 也能加载 ~/.local/bin（以及 cc-switch 时的 IS_SANDBOX=1）
 write_profile_guard() {
-  # 只有 bash 用户（rc 为 ~/.bashrc）需要这个兜底
+  local mode="${1:-cc-switch}"
   [[ "$SHELL_RC" == "$HOME/.bashrc" ]] || return 0
 
   local bash_profile="$HOME/.bash_profile"
   local profile="$HOME/.profile"
 
-  # 1) 如果 ~/.bash_profile 已存在，追加到其中
   if [[ -f "$bash_profile" ]]; then
-    if ! grep -q '# cc-switch' "$bash_profile" 2>/dev/null; then
-      # shellcheck disable=SC2016  # 注入的是字面量，供用户 shell 展开
-      echo 'export PATH="$HOME/.local/bin:$PATH"  # cc-switch' >> "$bash_profile"
-      echo 'export IS_SANDBOX=1  # cc-switch' >> "$bash_profile"
-    fi
+    write_env_block "$bash_profile" "$mode"
     return 0
   fi
 
-  # 2) 如果 ~/.profile 已存在，追加到其中
   if [[ -f "$profile" ]]; then
-    if ! grep -q '# cc-switch' "$profile" 2>/dev/null; then
-      # shellcheck disable=SC2016  # 注入的是字面量，供用户 shell 展开
-      echo 'export PATH="$HOME/.local/bin:$PATH"  # cc-switch' >> "$profile"
-      echo 'export IS_SANDBOX=1  # cc-switch' >> "$profile"
-    fi
+    write_env_block "$profile" "$mode"
     return 0
   fi
 
-  # 3) 两者都不存在（极端情况：最小化 LXC 容器）：创建 ~/.bash_profile
-  #    使其 source ~/.bashrc 和 ~/.profile（如果将来创建），并写入环境变量
   cat > "$bash_profile" <<'PROFILE_EOF'
-# ~/.bash_profile — created by codex installer (cc-switch)
+# ~/.bash_profile — created by install-codex
 
 if [ -f "$HOME/.bashrc" ]; then
     . "$HOME/.bashrc"
@@ -186,41 +426,224 @@ fi
 if [ -f "$HOME/.profile" ]; then
     . "$HOME/.profile"
 fi
-
-export PATH="$HOME/.local/bin:$PATH"  # cc-switch
-export IS_SANDBOX=1  # cc-switch
 PROFILE_EOF
+  write_env_block "$bash_profile" "$mode"
 }
 
-### 用户交互 ###
-
-# 选择跳过配置则返回 0（[y/N] 默认 N：回车或非 y 均不跳过）
-ask_skip_config() {
-  read -rp "跳过配置 API Key 和 URL？[y/N]: " SKIP_ANSWER
-  [[ "$SKIP_ANSWER" =~ ^[Yy]$ ]]
+configure_shell_env() {
+  local mode="$1"
+  export PATH="$HOME/.local/bin:$PATH"
+  write_env_block "$SHELL_RC" "$mode"
+  if [[ "$SHELL_RC" == "$HOME/.zshrc" ]]; then
+    write_env_block "$HOME/.zshenv" "$mode"
+  fi
+  if [[ "$mode" == "cc-switch" ]]; then
+    export IS_SANDBOX=1
+  fi
+  write_profile_guard "$mode"
 }
 
-# 选择 WebDAV 导入则返回 0，并读取凭据（[y/N] 默认 N：回车或非 y 均不导入）
-ask_webdav() {
-  read -rp "从 WebDAV 导入 cc-switch 配置？[y/N]: " WEBDAV_ANSWER
-  [[ "$WEBDAV_ANSWER" =~ ^[Yy]$ ]] || return 1
-  read -rp "WebDAV Base URL: " WEBDAV_URL
-  read -rp "WebDAV Username: " WEBDAV_USER
-  read -rsp "WebDAV Password: " WEBDAV_PASS
+### 交互式 [*] 方向键多选 TUI ###
+
+has_tty() {
+  ( : <>/dev/tty ) 2>/dev/null
+}
+
+# 处理单次按键事件（供 TUI 主循环和单元测试调用）
+# 返回码: 0=重绘继续, 1=确认退出循环, 2=取消退出
+tui_handle_key() {
+  local key="$1"
+  local total="${#TOOL_IDS[@]}"
+  case "$key" in
+    UP|k|K)
+      TUI_CURSOR=$(( (TUI_CURSOR - 1 + total) % total ))
+      TUI_MSG=""
+      return 0
+      ;;
+    DOWN|j|J)
+      TUI_CURSOR=$(( (TUI_CURSOR + 1) % total ))
+      TUI_MSG=""
+      return 0
+      ;;
+    " ")
+      if [[ "${TOOL_SELECTED[$TUI_CURSOR]}" == "1" ]]; then
+        TOOL_SELECTED[$TUI_CURSOR]=0
+      else
+        TOOL_SELECTED[$TUI_CURSOR]=1
+      fi
+      TUI_MSG=""
+      return 0
+      ;;
+    a|A)
+      if (( $(selected_count) == total )); then
+        reset_selection
+      else
+        select_all_tools
+      fi
+      TUI_MSG=""
+      return 0
+      ;;
+    ENTER)
+      if (( $(selected_count) == 0 )); then
+        if [[ "$TUI_ALLOW_EMPTY" == "true" ]]; then
+          return 1
+        fi
+        TUI_MSG="请至少选择一项（按空格勾选）"
+        return 0
+      fi
+      return 1
+      ;;
+    q|Q)
+      return 2
+      ;;
+  esac
+  return 0
+}
+
+tui_render_frame() {
+  local fd="$1" title="$2" show_status="$3"
+  local total="${#TOOL_IDS[@]}" i mark pointer status_tag line
+  printf '\033[1m%s\033[0m\033[K\n' "$title" >&"$fd"
+  printf '\033[2m操作: ↑/↓ 移动  空格 勾选/取消  a 全选/全不选  Enter 确认  q 退出\033[0m\033[K\n' >&"$fd"
+  for i in "${!TOOL_IDS[@]}"; do
+    if [[ "${TOOL_SELECTED[$i]}" == "1" ]]; then
+      mark="[*]"
+    else
+      mark="[ ]"
+    fi
+    if (( i == TUI_CURSOR )); then
+      pointer=">"
+    else
+      pointer=" "
+    fi
+    status_tag=""
+    if [[ "$show_status" == "true" ]]; then
+      if [[ "${TOOL_INSTALLED[$i]}" == "1" ]]; then
+        status_tag=" [已安装]"
+      else
+        status_tag=" [未安装]"
+      fi
+    fi
+    line=$(printf ' %s %s %-10s %s%s' "$pointer" "$mark" "${TOOL_IDS[$i]}" "${TOOL_LABELS[$i]}" "$status_tag")
+    if (( i == TUI_CURSOR )); then
+      printf '\033[36m%s\033[0m\033[K\n' "$line" >&"$fd"
+    else
+      printf '%s\033[K\n' "$line" >&"$fd"
+    fi
+  done
+  if [[ -n "$TUI_MSG" ]]; then
+    printf '\033[33m%s\033[0m\033[K\n' "$TUI_MSG" >&"$fd"
+  else
+    printf '已选 %d/%d 项\033[K\n' "$(selected_count)" "$total" >&"$fd"
+  fi
+}
+
+# 在 /dev/tty 上运行交互多选菜单；show_status=true 时显示已安装状态
+tui_multiselect() {
+  local title="$1" show_status="${2:-false}" allow_empty="${3:-false}"
+  TUI_CURSOR=0
+  TUI_MSG=""
+  TUI_ALLOW_EMPTY="$allow_empty"
+
+  exec 3<>/dev/tty
+  printf '\033[?25l' >&3
+  # 退出或中断时恢复终端光标并关闭 fd 3
+  trap 'printf "\033[?25h" >&3 2>/dev/null || true; exec 3>&- 2>/dev/null || true' RETURN INT TERM
+
+  local frame_lines=$(( ${#TOOL_IDS[@]} + 3 ))
+  local key seq action rc=0
+  tui_render_frame 3 "$title" "$show_status"
+
+  while true; do
+    action=""
+    if ! IFS= read -rsn1 key <&3; then
+      rc=2
+      break
+    fi
+
+    if [[ "$key" == $'\x1b' ]]; then
+      seq=""
+      IFS= read -rsn2 -t 0.05 seq <&3 || true
+      case "$seq" in
+        "[A"|"OA") action="UP" ;;
+        "[B"|"OB") action="DOWN" ;;
+        *)         continue ;;
+      esac
+    elif [[ -z "$key" || "$key" == $'\n' || "$key" == $'\r' ]]; then
+      action="ENTER"
+    else
+      action="$key"
+    fi
+
+    if tui_handle_key "$action"; then
+      printf '\033[%dA' "$frame_lines" >&3
+      tui_render_frame 3 "$title" "$show_status"
+    else
+      rc=$?
+      break
+    fi
+  done
+
+  printf '\033[?25h' >&3
+  exec 3>&-
+  trap - RETURN INT TERM
+
+  if (( rc == 2 )); then
+    echo "已取消。"
+    exit 0
+  fi
   echo
 }
 
-# 选择卸载则返回 0（[y/N] 默认 N）
-confirm_uninstall() {
-  read -rp "确认卸载？将删除所有相关工具和配置文件 [y/N]: " CONFIRM
-  [[ "$CONFIRM" =~ ^[Yy]$ ]]
+### 交互询问 ###
+
+select_tools_for_install() {
+  if [[ -n "$HARNESS_ARG" ]]; then
+    if ! apply_tool_list "$HARNESS_ARG"; then
+      exit 1
+    fi
+    return
+  fi
+
+  if has_tty; then
+    tui_multiselect "请选择要安装的 CLI 工具：" "false" "false"
+  else
+    echo "未检测到交互终端且未指定 --harness，使用默认选择：claude, codex, cc-switch。"
+  fi
 }
 
-# 决定是否导入配置：
-#   --skip-config / 选择跳过 / 拒绝导入 → 直接安装（不导入配置）
-#   选择 WebDAV 导入 → WEBDAV_IMPORT=true，稍后从云端拉取并应用配置
+# 选择跳过配置则返回 0（[y/N] 默认 N）
+ask_skip_config() {
+  local ans
+  read -rp "跳过配置 API Key 和 URL？[y/N]: " ans </dev/tty
+  [[ "$ans" =~ ^[Yy]$ ]]
+}
+
+# 选择 WebDAV 导入则返回 0，并读取凭据（[y/N] 默认 N）
+ask_webdav() {
+  local ans
+  read -rp "从 WebDAV 导入 cc-switch 配置？[y/N]: " ans </dev/tty
+  [[ "$ans" =~ ^[Yy]$ ]] || return 1
+  read -rp "WebDAV Base URL: " WEBDAV_URL </dev/tty
+  read -rp "WebDAV Username: " WEBDAV_USER </dev/tty
+  read -rsp "WebDAV Password: " WEBDAV_PASS </dev/tty
+  echo
+}
+
+confirm_uninstall() {
+  local confirm
+  if ! has_tty; then
+    return 0
+  fi
+  read -rp "确认卸载已勾选的工具及相关配置？[y/N]: " confirm </dev/tty
+  [[ "$confirm" =~ ^[Yy]$ ]]
+}
+
 select_config_mode() {
-  if [[ "${1:-}" == "--skip-config" ]]; then
+  if [[ "$SKIP_CONFIG" == "true" ]] || ! is_selected "cc-switch"; then
+    return
+  fi
+  if ! has_tty; then
     return
   fi
   if ask_skip_config; then
@@ -231,9 +654,125 @@ select_config_mode() {
   fi
 }
 
-if [[ "${1:-}" == "--uninstall" ]]; then
-  echo "=== 卸载 Codex / Claude Code / cc-switch-cli ==="
+### 本机安装检测 & 卸载逻辑 ###
+
+NPM_ROOT_SYS=""
+NPM_ROOT_USER=""
+
+refresh_npm_roots() {
+  NPM_ROOT_SYS=""
+  NPM_ROOT_USER=""
+  if command_exists npm; then
+    if [[ "$(npm prefix -g 2>/dev/null)" == "$HOME"/* ]]; then
+      NPM_ROOT_USER="$(npm root -g 2>/dev/null || true)"
+    else
+      NPM_ROOT_SYS="$(run_as_root npm root -g 2>/dev/null || true)"
+    fi
+  fi
+}
+
+is_pkg_installed() {
+  local pkg="$1" bin="$2"
+  if [[ -n "$NPM_ROOT_USER" && -d "${NPM_ROOT_USER}/${pkg}" ]]; then
+    return 0
+  fi
+  if [[ -n "$NPM_ROOT_SYS" && -d "${NPM_ROOT_SYS}/${pkg}" ]]; then
+    return 0
+  fi
+  command_exists "$bin"
+}
+
+detect_installed_tools() {
+  if ! command_exists npm; then
+    try_load_nvm || true
+  fi
+  refresh_npm_roots
+
+  local i id pkg bin
+  for i in "${!TOOL_IDS[@]}"; do
+    id="${TOOL_IDS[$i]}"
+    pkg="${TOOL_PKGS[$i]}"
+    bin="${TOOL_BINS[$i]}"
+    TOOL_INSTALLED[$i]=0
+    if [[ -n "$pkg" ]]; then
+      if is_pkg_installed "$pkg" "$bin"; then
+        TOOL_INSTALLED[$i]=1
+      fi
+    elif [[ "$id" == "agy" ]]; then
+      if [[ -e "$HOME/.local/bin/agy" ]] || command_exists agy; then
+        TOOL_INSTALLED[$i]=1
+      fi
+    elif [[ "$id" == "cc-switch" ]]; then
+      if [[ -e "$HOME/.local/bin/cc-switch" ]] || command_exists cc-switch; then
+        TOOL_INSTALLED[$i]=1
+      fi
+    fi
+    TOOL_SELECTED[$i]="${TOOL_INSTALLED[$i]}"
+  done
+}
+
+uninstall_one_npm_pkg() {
+  local pkg="$1" bin="$2"
+  echo "卸载 ${pkg} ..."
+
+  # 同时检查用户级（nvm / prefix=$HOME）与系统级 npm，确保都能清干净
+  if [[ -n "$NPM_ROOT_USER" && -d "${NPM_ROOT_USER}/${pkg}" ]]; then
+    if ! npm uninstall -g "$pkg" 2>/dev/null; then
+      rm -rf "${NPM_ROOT_USER}/${pkg}"
+      echo "  已删除 ${NPM_ROOT_USER}/${pkg}"
+    fi
+  fi
+
+  if [[ -n "$NPM_ROOT_SYS" && "$NPM_ROOT_SYS" != "$NPM_ROOT_USER" && -d "${NPM_ROOT_SYS}/${pkg}" ]]; then
+    if ! run_as_root npm uninstall -g "$pkg" 2>/dev/null; then
+      run_as_root rm -rf "${NPM_ROOT_SYS}/${pkg}"
+      echo "  已删除 ${NPM_ROOT_SYS}/${pkg}"
+    fi
+  fi
+
+  local bin_link
+  for bin_link in "/usr/bin/${bin}" "/usr/local/bin/${bin}"; do
+    if [[ -L "$bin_link" ]]; then
+      run_as_root rm -f "$bin_link"
+      echo "  已删除残留链接 ${bin_link}"
+    fi
+  done
+}
+
+clean_shell_rc_markers() {
+  local f="$1" remove_cc="$2" remove_local="$3" remove_nvm="$4"
+  [[ -f "$f" ]] || return 0
+  local args=()
+  [[ "$remove_cc" == "true" ]]    && args+=(-e '/# cc-switch/d')
+  if [[ "$remove_local" == "true" ]]; then
+    args+=(-e '/# local-bin/d' -e '/^# Added by Antigravity CLI installer$/{N;/\nexport PATH=.*\.local\/bin/d;}')
+  fi
+  [[ "$remove_nvm" == "true" ]]   && args+=(-e '/# nvm/d')
+  if (( ${#args[@]} == 0 )); then
+    return 0
+  fi
+  echo "清理 $f 中的相关条目 ..."
+  sed -i "${args[@]}" "$f"
+}
+
+run_uninstall() {
+  echo "=== 卸载 AI Harness / cc-switch-cli ==="
   echo
+
+  detect_installed_tools
+
+  if [[ -n "$HARNESS_ARG" ]]; then
+    if ! apply_tool_list "$HARNESS_ARG"; then
+      exit 1
+    fi
+  elif has_tty; then
+    tui_multiselect "请选择要卸载的工具（已自动预勾选本机已安装项）：" "true" "true"
+  fi
+
+  if (( $(selected_count) == 0 )); then
+    echo "未选择任何卸载项，已退出。"
+    exit 0
+  fi
 
   if ! confirm_uninstall; then
     echo "已取消。"
@@ -241,168 +780,126 @@ if [[ "${1:-}" == "--uninstall" ]]; then
   fi
   echo
 
-  # 卸载 npm 全局包
-  if command_exists npm; then
-    NPM_GLOBAL="$(run_as_root npm root -g)"
+  local i id pkg bin
+  for i in "${!TOOL_IDS[@]}"; do
+    [[ "${TOOL_SELECTED[$i]}" == "1" ]] || continue
+    id="${TOOL_IDS[$i]}"
+    pkg="${TOOL_PKGS[$i]}"
+    bin="${TOOL_BINS[$i]}"
 
-    for pkg in "@openai/codex" "@anthropic-ai/claude-code"; do
-      echo "卸载 ${pkg} ..."
-      if ! run_as_root npm uninstall -g "$pkg" 2>/dev/null; then
-        echo "  npm 卸载失败，直接删除文件 ..."
-        pkg_dir="${NPM_GLOBAL}/${pkg}"
-        if [[ -d "$pkg_dir" ]]; then
-          run_as_root rm -rf "$pkg_dir"
-          echo "  已删除 ${pkg_dir}"
-        else
-          echo "  (跳过，未找到 ${pkg_dir})"
-        fi
-      fi
-    done
-
-    # 清理可能残留的 bin 软链接
-    for bin_link in /usr/bin/codex /usr/bin/claude /usr/local/bin/codex /usr/local/bin/claude; do
-      if [[ -L "$bin_link" ]]; then
-        run_as_root rm -f "$bin_link"
-        echo "  已删除残留链接 ${bin_link}"
-      fi
-    done
-  else
-    # 系统无 npm：包可能装在 nvm 里，尝试通过 nvm 卸载（用户级，无需 sudo）
-    echo "npm 未找到，尝试通过 nvm 卸载 ..."
-    if [[ -s "$HOME/.nvm/nvm.sh" ]]; then
-      export NVM_DIR="$HOME/.nvm"
-      # shellcheck disable=SC1091
-      . "$NVM_DIR/nvm.sh"
-      if nvm which default >/dev/null 2>&1; then
-        # use 失败不中止脚本：后续 npm 不可用时走 rm -rf 兜底
-        nvm use default >/dev/null 2>&1 || true
-        for pkg in "@openai/codex" "@anthropic-ai/claude-code"; do
-          echo "卸载 ${pkg} ..."
-          if ! npm uninstall -g "$pkg" 2>/dev/null; then
-            echo "  npm 卸载失败，直接删除文件 ..."
-            pkg_dir="$(npm root -g 2>/dev/null || true)/${pkg}"
-            if [[ -d "$pkg_dir" ]]; then
-              rm -rf "$pkg_dir"
-              echo "  已删除 ${pkg_dir}"
-            else
-              echo "  (跳过，未找到 ${pkg_dir})"
-            fi
-          fi
-        done
-      else
-        echo "  (nvm 中没有 default 版本，跳过)"
-      fi
-      unset NVM_DIR
-    else
-      echo "  (未找到 ~/.nvm，跳过)"
+    if [[ -n "$pkg" ]]; then
+      uninstall_one_npm_pkg "$pkg" "$bin"
     fi
+
+    case "$id" in
+      claude)
+        rm -f "$HOME/.claude/settings.json" 2>/dev/null || true
+        rmdir "$HOME/.claude" 2>/dev/null || true
+        echo "  已清理 ~/.claude/settings.json"
+        ;;
+      codex)
+        rm -rf "$HOME/.codex" 2>/dev/null || true
+        echo "  已清理 ~/.codex"
+        ;;
+      agy)
+        echo "卸载 Antigravity CLI (agy) ..."
+        rm -f "$HOME/.local/bin/agy" 2>/dev/null || true
+        rm -rf "$HOME/.cache/antigravity" 2>/dev/null || true
+        echo "  已移除 ~/.local/bin/agy 与缓存（~/.gemini/antigravity-cli 已保留）"
+        ;;
+      cc-switch)
+        echo "卸载 cc-switch-cli ..."
+        rm -f "$HOME/.local/bin/cc-switch" 2>/dev/null || true
+        rm -rf "$HOME/.local/share/cc-switch" 2>/dev/null || true
+        rm -rf "$HOME/.local/share/cc-switch-cli" 2>/dev/null || true
+        rm -rf "$HOME/.cc-switch" 2>/dev/null || true
+        echo "  已移除 cc-switch-cli 与 ~/.cc-switch"
+        ;;
+    esac
+  done
+
+  # 刷新状态后再决定哪些 shell rc 标记可安全清理（避免部分卸载误删保留工具的环境）
+  refresh_npm_roots
+  local remove_cc="false" remove_local="false" remove_nvm="false"
+  if is_selected "cc-switch" && [[ ! -e "$HOME/.local/bin/cc-switch" ]]; then
+    remove_cc="true"
+  fi
+  if [[ ! -e "$HOME/.local/bin/agy" && ! -e "$HOME/.local/bin/cc-switch" ]]; then
+    remove_local="true"
+  fi
+  if ! any_npm_tool_installed; then
+    remove_nvm="true"
   fi
 
-  # 卸载 cc-switch-cli
-  echo "卸载 cc-switch-cli ..."
-  rm -f "$HOME/.local/bin/cc-switch" 2>/dev/null
-  rm -rf "$HOME/.local/share/cc-switch" 2>/dev/null
-  rm -rf "$HOME/.local/share/cc-switch-cli" 2>/dev/null
-  echo "  (如果已安装，已从 ~/.local/bin 和 ~/.local/share 中移除)"
-
-  # 删除配置文件
-  echo "删除配置文件 ..."
-  rm -rf "$HOME/.codex" 2>/dev/null
-  rm -f "$HOME/.claude/settings.json" 2>/dev/null
-  rmdir "$HOME/.claude" 2>/dev/null || true
-  rm -rf "$HOME/.cc-switch" 2>/dev/null
-  echo "  已删除 ~/.codex、~/.claude/settings.json 和 ~/.cc-switch"
-
-  # 清理 shell rc 中的条目（与安装时写入的文件保持一致）
   SHELL_RC="$(detect_shell_rc)"
-  if [[ -n "$SHELL_RC" ]] && [[ -f "$SHELL_RC" ]]; then
-    echo "清理 $SHELL_RC 中的相关条目 ..."
-    sed -i -e '/# cc-switch/d' -e '/# nvm/d' "$SHELL_RC"
-    echo "  已清理。"
+  if [[ -n "$SHELL_RC" ]]; then
+    clean_shell_rc_markers "$SHELL_RC" "$remove_cc" "$remove_local" "$remove_nvm"
   fi
-
-  # 也清理 ~/.profile、~/.bash_profile 和 ~/.zshenv 中的兜底条目
   for f in "$HOME/.profile" "$HOME/.bash_profile" "$HOME/.zshenv"; do
-    if [[ -f "$f" ]]; then
-      echo "清理 $f 中的相关条目 ..."
-      sed -i -e '/# cc-switch/d' -e '/# nvm/d' "$f"
-      echo "  已清理。"
+    if [[ "$f" != "$SHELL_RC" ]]; then
+      clean_shell_rc_markers "$f" "$remove_cc" "$remove_local" "$remove_nvm"
     fi
   done
 
   echo
   echo "卸载完成。"
   exit 0
-fi
-
-select_config_mode
-
-if [[ -r /etc/os-release ]]; then
-  # shellcheck disable=SC1091
-  . /etc/os-release
-else
-  echo "错误：无法检测 Linux 发行版（未找到 /etc/os-release）。"
-  exit 1
-fi
-
-DISTRO_ID="${ID:-}"
-DISTRO_LIKE="${ID_LIKE:-}"
-
-is_debian_like() {
-  [[ "$DISTRO_ID" == "debian" || "$DISTRO_ID" == "ubuntu" || " $DISTRO_LIKE " == *" debian "* ]]
 }
 
-is_arch_like() {
-  [[ "$DISTRO_ID" == "arch" || " $DISTRO_LIKE " == *" arch "* ]]
-}
+### 安装逻辑 ###
 
-is_rhel_like() {
-  [[ "$DISTRO_ID" == "centos" || "$DISTRO_ID" == "rhel" || "$DISTRO_ID" == "rocky" || "$DISTRO_ID" == "almalinux" || " $DISTRO_LIKE " == *" rhel "* || " $DISTRO_LIKE " == *" fedora "* ]]
-}
+install_distro_pkg() {
+  local label="$1"
+  shift
+  if [[ -r /etc/os-release ]]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+  else
+    echo "错误：无法检测 Linux 发行版（未找到 /etc/os-release）。" >&2
+    exit 1
+  fi
 
+  local distro_id="${ID:-}"
+  local distro_like="${ID_LIKE:-}"
 
-install_bubblewrap() {
-  echo "未检测到 bubblewrap，开始安装 ..."
+  echo "未检测到 ${label}，开始安装 ..."
 
-  if is_debian_like; then
-    run_as_root apt update
-    run_as_root apt install -y bubblewrap
+  if [[ "$distro_id" == "debian" || "$distro_id" == "ubuntu" || " $distro_like " == *" debian "* ]]; then
+    run_as_root apt-get update
+    run_as_root apt-get install -y "$@"
     return
   fi
 
-  if is_arch_like; then
-    run_as_root pacman -Sy --noconfirm bubblewrap
+  if [[ "$distro_id" == "arch" || " $distro_like " == *" arch "* ]]; then
+    run_as_root pacman -Sy --noconfirm "$@"
     return
   fi
 
-  if is_rhel_like; then
+  if [[ "$distro_id" == "centos" || "$distro_id" == "rhel" || "$distro_id" == "rocky" || "$distro_id" == "almalinux" \
+    || " $distro_like " == *" rhel "* || " $distro_like " == *" fedora "* ]]; then
     if command_exists dnf; then
-      run_as_root dnf install -y bubblewrap
+      run_as_root dnf install -y "$@"
     elif command_exists yum; then
-      run_as_root yum install -y bubblewrap
+      run_as_root yum install -y "$@"
     else
-      echo "错误：当前 CentOS/RHEL 系统中既没有 dnf，也没有 yum。"
+      echo "错误：当前 CentOS/RHEL 系统中既没有 dnf，也没有 yum。" >&2
       exit 1
     fi
     return
   fi
 
-  echo "错误：暂不支持当前 Linux 发行版：${DISTRO_ID:-unknown}。"
+  echo "错误：暂不支持当前 Linux 发行版：${distro_id:-unknown}。" >&2
   exit 1
 }
 
-SHELL_RC="$(detect_shell_rc)"
+ensure_curl() {
+  command_exists curl && return 0
+  install_distro_pkg "curl" curl ca-certificates
+}
 
-# 已有 npm 且 Node ≥ 22 时直接用现有环境；否则用 nvm 安装 Node 24 LTS
-if ! node_version_ok; then
-  install_nvm_node
-  NVM_NODE=true
-  echo
-fi
-
-if ! command_exists bwrap; then
-  install_bubblewrap
-fi
+install_bubblewrap() {
+  install_distro_pkg "bubblewrap" bubblewrap
+}
 
 install_npm_pkg() {
   local pkg="$1" rc
@@ -424,61 +921,152 @@ install_npm_pkg() {
   fi
 }
 
-install_npm_pkg @openai/codex
-install_npm_pkg @anthropic-ai/claude-code
-
-echo "安装 cc-switch-cli (SaladDay) ..."
-# 检查二进制文件是否存在，而非检查 PATH（避免 PATH 未包含 ~/.local/bin 时重复安装）
-if [[ ! -x "$HOME/.local/bin/cc-switch" ]]; then
-  export CC_SWITCH_FORCE=1
-  curl -fsSL https://github.com/SaladDay/cc-switch-cli/releases/latest/download/install.sh | bash
-fi
-# 确保 cc-switch 在当前会话中可用
-export PATH="$HOME/.local/bin:$PATH"
-# 将 PATH 和 IS_SANDBOX 尽早写入 rc（幂等），避免后续步骤失败导致遗漏
-write_cc_env "$SHELL_RC"
-# zsh 的非交互调用（脚本、cron）不读 .zshrc，另写 .zshenv（任何 zsh 进程都会读取）
-if [[ "$SHELL_RC" == "$HOME/.zshrc" ]]; then
-  write_cc_env "$HOME/.zshenv"
-fi
-export IS_SANDBOX=1  # 当前会话也立即生效
-
-# 兜底：确保 login shell 也能获得环境变量（LXC 容器中 ~/.profile 可能不 source ~/.bashrc）
-write_profile_guard
-
-if [[ "$WEBDAV_IMPORT" == "true" ]]; then
-  echo "从 WebDAV 导入配置 ..."
-  if ! "$HOME/.local/bin/cc-switch" config webdav set \
-    --base-url "$WEBDAV_URL" \
-    --username "$WEBDAV_USER" \
-    --password "$WEBDAV_PASS" \
-    --enable; then
-    echo "错误: WebDAV 配置设置失败，跳过导入。"
-  elif "$HOME/.local/bin/cc-switch" config webdav download; then
-    echo "WebDAV 配置下载完成，正在应用配置到应用目录 ..."
-    # download 只恢复到 cc-switch 内部数据库，需通过 provider switch 将配置写入应用目录
-    CC_SETTINGS="$HOME/.cc-switch/settings.json"
-    if [[ -f "$CC_SETTINGS" ]]; then
-      CLAUDE_PROVIDER=$(grep '"currentProviderClaude"' "$CC_SETTINGS" 2>/dev/null | grep -o '[a-f0-9]\{8\}-[a-f0-9]\{4\}-[a-f0-9]\{4\}-[a-f0-9]\{4\}-[a-f0-9]\{12\}' | head -1 || true)
-      if [[ -n "$CLAUDE_PROVIDER" ]]; then
-        "$HOME/.local/bin/cc-switch" provider switch "$CLAUDE_PROVIDER" --app claude 2>/dev/null || true
-      fi
-      CODEX_PROVIDER=$(grep '"currentProviderCodex"' "$CC_SETTINGS" 2>/dev/null | grep -o '[a-f0-9]\{8\}-[a-f0-9]\{4\}-[a-f0-9]\{4\}-[a-f0-9]\{4\}-[a-f0-9]\{12\}' | head -1 || true)
-      if [[ -n "$CODEX_PROVIDER" ]]; then
-        "$HOME/.local/bin/cc-switch" provider switch "$CODEX_PROVIDER" --app codex 2>/dev/null || true
-      fi
-    fi
-    echo "WebDAV 配置导入完成。"
-  else
-    echo "警告: WebDAV 配置拉取失败，请检查网络连接和凭据后重试。"
+install_agy() {
+  echo "安装 Google Antigravity CLI (agy) ..."
+  if [[ -x "$HOME/.local/bin/agy" ]]; then
+    echo "检测到已有 $HOME/.local/bin/agy，跳过安装（agy 支持自动更新）。"
+    return 0
   fi
-fi
+  ensure_curl
+  curl -fsSL https://antigravity.google/cli/install.sh | bash
+}
 
-echo "已安装："
-echo "  - @openai/codex"
-echo "  - @anthropic-ai/claude-code"
-echo "  - cc-switch-cli"
-echo
-echo "提示：运行 source $SHELL_RC 或重新打开终端以使 PATH 生效。"
-echo "      运行 cc-switch 可切换 Claude Code 的不同 provider。"
-echo "      运行 claude 可启动 Claude Code。"
+apply_cc_switch_webdav_providers() {
+  local cc_settings="$HOME/.cc-switch/settings.json"
+  [[ -f "$cc_settings" ]] || return 0
+
+  # cc-switch-cli 对单活动供应商工具在 settings.json 中保存 currentProvider<App>
+  local pairs=(
+    "claude:currentProviderClaude"
+    "codex:currentProviderCodex"
+    "gemini:currentProviderGemini"
+    "opencode:currentProviderOpencode"
+  )
+  local pair app key provider_id
+  for pair in "${pairs[@]}"; do
+    app="${pair%%:*}"
+    key="${pair#*:}"
+    is_selected "$app" || continue
+    provider_id="$(sed -n 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$cc_settings" 2>/dev/null | head -1 || true)"
+    if [[ -n "$provider_id" ]]; then
+      "$HOME/.local/bin/cc-switch" provider switch "$provider_id" --app "$app" 2>/dev/null || true
+    fi
+  done
+}
+
+install_cc_switch() {
+  echo "安装 cc-switch-cli (SaladDay) ..."
+  if [[ ! -x "$HOME/.local/bin/cc-switch" ]]; then
+    ensure_curl
+    export CC_SWITCH_FORCE=1
+    curl -fsSL https://github.com/SaladDay/cc-switch-cli/releases/latest/download/install.sh | bash
+  fi
+
+  configure_shell_env "cc-switch"
+
+  if [[ "$WEBDAV_IMPORT" == "true" ]]; then
+    echo "从 WebDAV 导入配置 ..."
+    if ! "$HOME/.local/bin/cc-switch" config webdav set \
+      --base-url "$WEBDAV_URL" \
+      --username "$WEBDAV_USER" \
+      --password "$WEBDAV_PASS" \
+      --enable; then
+      echo "错误: WebDAV 配置设置失败，跳过导入。"
+    elif "$HOME/.local/bin/cc-switch" config webdav download; then
+      echo "WebDAV 配置下载完成，正在应用配置到应用目录 ..."
+      apply_cc_switch_webdav_providers
+      echo "WebDAV 配置导入完成。"
+    else
+      echo "警告: WebDAV 配置拉取失败，请检查网络连接和凭据后重试。"
+    fi
+  fi
+}
+
+print_summary() {
+  echo
+  echo "已安装："
+  local i id
+  for i in "${!TOOL_IDS[@]}"; do
+    [[ "${TOOL_SELECTED[$i]}" == "1" ]] || continue
+    id="${TOOL_IDS[$i]}"
+    if [[ -n "${TOOL_PKGS[$i]}" ]]; then
+      echo "  - ${TOOL_PKGS[$i]} (${id})"
+    elif [[ "$id" == "agy" ]]; then
+      echo "  - Antigravity CLI (agy)"
+    elif [[ "$id" == "cc-switch" ]]; then
+      echo "  - cc-switch-cli (cc-switch)"
+    fi
+  done
+
+  echo
+  echo "提示：运行 source $SHELL_RC 或重新打开终端以使 PATH 生效。"
+  if is_selected "cc-switch"; then echo "      运行 cc-switch 可切换 Claude / Codex / Gemini / OpenCode / Pi 的 provider。"; fi
+  if is_selected "claude"; then    echo "      运行 claude 可启动 Claude Code。"; fi
+  if is_selected "codex"; then     echo "      运行 codex 可启动 Codex。"; fi
+  if is_selected "dsh"; then       echo "      运行 dsh web（或 dsh）可启动 DeepSeek Harness。"; fi
+  if is_selected "agy"; then       echo "      运行 agy 可启动 Antigravity CLI。"; fi
+  if is_selected "grok"; then      echo "      运行 grok 可启动 Grok Build。"; fi
+  if is_selected "gemini"; then    echo "      运行 gemini 可启动 Gemini CLI。"; fi
+  if is_selected "opencode"; then  echo "      运行 opencode 可启动 OpenCode。"; fi
+  if is_selected "pi"; then        echo "      运行 pi 可启动 Pi Coding Agent。"; fi
+
+  if is_selected "dsh" || is_selected "agy" || is_selected "grok"; then
+    echo "注：cc-switch-cli 暂不支持管理 dsh / agy / grok，这几款工具请按各自方式登录或配置 API Key。"
+  fi
+}
+
+main() {
+  parse_args "$@"
+
+  if [[ "$ACTION" == "uninstall" ]]; then
+    run_uninstall
+  fi
+
+  select_tools_for_install
+  select_config_mode
+
+  SHELL_RC="$(detect_shell_rc)"
+
+  if needs_node; then
+    local req_ver min_major min_minor
+    req_ver="$(required_node_version)"
+    min_major="${req_ver%% *}"
+    min_minor="${req_ver##* }"
+    if ! node_version_ok "$min_major" "$min_minor"; then
+      install_nvm_node
+      NVM_NODE=true
+      echo
+    fi
+  fi
+
+  if needs_bwrap && ! command_exists bwrap; then
+    install_bubblewrap
+  fi
+
+  if needs_local_bin_path; then
+    mkdir -p "$HOME/.local/bin"
+    export PATH="$HOME/.local/bin:$PATH"
+  fi
+
+  local i id pkg
+  for i in "${!TOOL_IDS[@]}"; do
+    [[ "${TOOL_SELECTED[$i]}" == "1" ]] || continue
+    id="${TOOL_IDS[$i]}"
+    pkg="${TOOL_PKGS[$i]}"
+    if [[ -n "$pkg" ]]; then
+      install_npm_pkg "$pkg"
+    elif [[ "$id" == "agy" ]]; then
+      install_agy
+    elif [[ "$id" == "cc-switch" ]]; then
+      install_cc_switch
+    fi
+  done
+
+  if ! is_selected "cc-switch" && is_selected "agy"; then
+    configure_shell_env "local-bin"
+  fi
+
+  print_summary
+}
+
+main "$@"

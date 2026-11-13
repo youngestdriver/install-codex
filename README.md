@@ -1,6 +1,6 @@
 # install-codex
 
-用于在 Linux 环境下初始化 Codex / Claude Code / CC-switch 的脚本。
+用于在 Linux 环境下初始化 AI 编程 CLI Harness 及 CC-Switch CLI 的脚本。
 
 ## 一键安装
 
@@ -11,17 +11,28 @@ curl -sSL -o install.sh https://raw.githubusercontent.com/youngestdriver/install
 bash install.sh
 ```
 
+运行后会弹出交互式多选界面（支持 `↑/↓` 或 `j/k` 移动、`空格` 切换 `[*]`/`[ ]`、`a` 全选/全不选、`Enter` 确认、`q` 退出），**默认预勾选 `claude`、`codex`、`cc-switch`**：
+
+1. `claude` — Claude Code (`@anthropic-ai/claude-code`)
+2. `codex` — OpenAI Codex (`@openai/codex`)
+3. `dsh` — DeepSeek Harness (`@deepseek-ai/dsh`，需 Node ≥ 24.9.0)
+4. `agy` — Google Antigravity CLI (`agy` 官方二进制)
+5. `grok` — xAI Grok Build (`@xai-official/grok`)
+6. `gemini` — Gemini CLI (`@google/gemini-cli`)
+7. `opencode` — OpenCode (`opencode-ai`，需 Node ≥ 22.19.0)
+8. `pi` — Pi Coding Agent (`@earendil-works/pi-coding-agent`，需 Node ≥ 22.19.0)
+9. `cc-switch` — CC-Switch CLI（provider 切换与 WebDAV 同步工具）
+
 依赖安装策略：
 
-- **Node.js** — 已有 npm 且 Node ≥ 22 时直接用现有环境；否则通过 [nvm](https://github.com/nvm-sh/nvm) 安装 Node 24 LTS（用户级，无需 root）
-- **bubblewrap** — 按发行版使用对应包管理器（Ubuntu/Debian 用 `apt`，Arch Linux 用 `pacman`，CentOS/RHEL 兼容系统用 `dnf` 或 `yum`）
+- **Node.js** — 仅当选择了任一 npm 工具时按最高版本需求检查：
+  - 选 `dsh` 需 Node ≥ 24.9.0；选 `opencode` / `pi` 需 Node ≥ 22.19.0；其余 npm 工具需 Node ≥ 22.0.0
+  - 满足则复用现有环境，否则通过 [nvm](https://github.com/nvm-sh/nvm) 安装 Node 24 LTS（用户级，无需 root）
+  - 仅安装 `agy` / `cc-switch` 时不会安装 Node.js
+- **bubblewrap** — 仅当选择 `claude` 或 `codex` 时按发行版安装（Ubuntu/Debian 用 `apt`，Arch Linux 用 `pacman`，CentOS/RHEL 兼容系统用 `dnf` 或 `yum`）
+- **cc-switch-cli 与 WebDAV** — 勾选 `cc-switch` 时安装并写入 `PATH` / `IS_SANDBOX=1`，随后询问是否从 WebDAV 导入配置（`[y/N]` 默认 `N`）；导入后会自动为本次已选且支持的单配置工具（`claude`、`codex`、`gemini`、`opencode`）应用当前 provider
 
-运行后交互式询问配置方式（`[y/N]` 默认均为 `N`，直接回车即选 `N`）：
-
-1. `跳过配置 API Key 和 URL？` — 选择跳过则直接安装
-2. 否则询问 `从 WebDAV 导入 cc-switch 配置？`：
-   - 选择导入 → 读取 WebDAV 凭据，从云端拉取 cc-switch 配置并应用到应用目录
-   - 选择不导入 → 等同跳过配置，直接安装（配置由 cc-switch 自行管理）
+> **CC-Switch 支持说明**：脚本安装的 `cc-switch-cli`（[SaladDay/cc-switch-cli](https://github.com/SaladDay/cc-switch-cli)）支持管理 `claude`、`codex`、`gemini`、`opencode`、`pi` 等，**暂不支持**管理 `dsh`、`agy`、`grok`（这三款需按各自方式登录或配置 API Key；若使用桌面端 [CC-Switch](https://github.com/farion1231/cc-switch)，桌面端已支持 `grok`、`dsh`、`agy` 等）。
 
 ### macOS（手动安装）
 
@@ -53,22 +64,24 @@ printenv IS_SANDBOX   # 验证输出 1
 ## 选项
 
 ```bash
-bash install.sh --skip-config   # 跳过所有配置询问，仅安装工具
-bash install.sh --uninstall     # 卸载所有工具和配置文件
+bash install.sh --harness claude,codex,dsh,cc-switch  # 非交互指定要安装的工具（支持 all）
+bash install.sh --skip-config                         # 跳过 WebDAV 配置询问，仅安装工具
+bash install.sh --uninstall                           # 交互多选卸载已安装工具（也可配合 --harness）
+bash install.sh --help                                # 查看帮助信息
 ```
-
-## 安装内容
-
-- **Codex** — `@openai/codex` 全局 npm 安装（凭据配置通过 cc-switch / WebDAV 导入）
-- **Claude Code** — `@anthropic-ai/claude-code` 全局 npm 安装
-- **cc-switch-cli** — 用于管理 Claude Code / Codex 等工具的 provider 切换
 
 ## 使用
 
 ```bash
-cc-switch   # 切换 provider
+cc-switch   # 切换 Claude / Codex / Gemini / OpenCode / Pi 的 provider
 claude      # 启动 Claude Code
 codex       # 启动 Codex
+dsh web     # 启动 DeepSeek Harness Web UI（或直接运行 dsh）
+agy         # 启动 Antigravity CLI
+grok        # 启动 Grok Build
+gemini      # 启动 Gemini CLI
+opencode    # 启动 OpenCode
+pi          # 启动 Pi Coding Agent
 ```
 
 ## 卸载
@@ -77,4 +90,4 @@ codex       # 启动 Codex
 bash install.sh --uninstall
 ```
 
-将删除：npm 全局包（codex、claude-code）、cc-switch-cli、`~/.codex`、`~/.claude/settings.json`，以及 shell rc 中的相关条目（`# cc-switch`、`# nvm`）。`~/.nvm` 本身保留，不会被删除。
+卸载时会先自动检测本机已安装的工具并弹出 `[*]` 方向键多选列表（已安装项默认预勾选），确认后仅移除所选工具及其对应配置；若不再保留 `cc-switch` / `agy` 或 npm 工具，也会按需清理 shell rc 中的 `# cc-switch`、`# local-bin`、`# nvm` 条目（`~/.nvm` 与 `~/.gemini/antigravity-cli` 本身保留，不会被删除）。
