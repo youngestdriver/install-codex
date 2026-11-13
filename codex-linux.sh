@@ -947,14 +947,138 @@ install_npm_pkg() {
   fi
 }
 
+# 将 Antigravity CLI (~/.gemini/antigravity-cli/settings.json) 初始化为最高权限
+configure_agy_permissions() {
+  local cfg_dir="$HOME/.gemini/antigravity-cli"
+  local cfg_file="${cfg_dir}/settings.json"
+  mkdir -p "$cfg_dir"
+
+  if [[ -s "$cfg_file" ]]; then
+    local tmp_cfg
+    tmp_cfg="$(mktemp "${cfg_dir}/.settings.XXXXXX.json")"
+    if command_exists python3 && python3 -c "import json" >/dev/null 2>&1; then
+      if AGY_CFG_JSON="$(cat "$cfg_file")" python3 - > "$tmp_cfg" <<'PY'
+import json, os, sys
+
+data = json.loads(os.environ["AGY_CFG_JSON"])
+if not isinstance(data, dict):
+    raise ValueError("settings root is not an object")
+
+data["agentMode"] = "auto"
+data["toolPermission"] = "always-proceed"
+data["artifactReviewPolicy"] = "always-proceed"
+data["allowNonWorkspaceAccess"] = True
+data["enableTerminalSandbox"] = False
+
+perms = data.get("permissions")
+if not isinstance(perms, dict):
+    perms = {}
+allow = perms.get("allow")
+if not isinstance(allow, list):
+    allow = []
+for rule in [
+    "read_file(*)",
+    "write_file(*)",
+    "command(*)",
+    "mcp(*)",
+    "read_url(*)",
+    "execute_url(*)",
+    "download_url(*)",
+]:
+    if rule not in allow:
+        allow.append(rule)
+perms["allow"] = allow
+data["permissions"] = perms
+
+json.dump(data, sys.stdout, indent=2, ensure_ascii=False)
+sys.stdout.write("\n")
+PY
+      then
+        mv "$tmp_cfg" "$cfg_file"
+      else
+        rm -f "$tmp_cfg"
+        echo "警告: 无法解析现有 ${cfg_file}，已保留原文件未修改。" >&2
+        return 0
+      fi
+    elif command_exists node; then
+      if AGY_CFG_JSON="$(cat "$cfg_file")" node - > "$tmp_cfg" <<'JS'
+const data = JSON.parse(process.env.AGY_CFG_JSON);
+if (!data || typeof data !== "object" || Array.isArray(data)) {
+  throw new Error("settings root is not an object");
+}
+data.agentMode = "auto";
+data.toolPermission = "always-proceed";
+data.artifactReviewPolicy = "always-proceed";
+data.allowNonWorkspaceAccess = true;
+data.enableTerminalSandbox = false;
+if (!data.permissions || typeof data.permissions !== "object" || Array.isArray(data.permissions)) {
+  data.permissions = {};
+}
+if (!Array.isArray(data.permissions.allow)) {
+  data.permissions.allow = [];
+}
+for (const rule of [
+  "read_file(*)",
+  "write_file(*)",
+  "command(*)",
+  "mcp(*)",
+  "read_url(*)",
+  "execute_url(*)",
+  "download_url(*)",
+]) {
+  if (!data.permissions.allow.includes(rule)) {
+    data.permissions.allow.push(rule);
+  }
+}
+process.stdout.write(JSON.stringify(data, null, 2) + "\n");
+JS
+      then
+        mv "$tmp_cfg" "$cfg_file"
+      else
+        rm -f "$tmp_cfg"
+        echo "警告: 无法解析现有 ${cfg_file}，已保留原文件未修改。" >&2
+        return 0
+      fi
+    else
+      rm -f "$tmp_cfg"
+      echo "警告: ${cfg_file} 已存在且未检测到 python3/node，跳过合并写入以避免覆盖原有配置。" >&2
+      return 0
+    fi
+  else
+    cat > "$cfg_file" <<'AGY_CFG_EOF'
+{
+  "agentMode": "auto",
+  "toolPermission": "always-proceed",
+  "artifactReviewPolicy": "always-proceed",
+  "allowNonWorkspaceAccess": true,
+  "enableTerminalSandbox": false,
+  "permissions": {
+    "allow": [
+      "read_file(*)",
+      "write_file(*)",
+      "command(*)",
+      "mcp(*)",
+      "read_url(*)",
+      "execute_url(*)",
+      "download_url(*)"
+    ]
+  }
+}
+AGY_CFG_EOF
+  fi
+
+  echo "已将 Antigravity CLI 权限配置为最高级别（${cfg_file}）。"
+}
+
 install_agy() {
   echo "安装 Google Antigravity CLI (agy) ..."
   if [[ -x "$HOME/.local/bin/agy" ]]; then
     echo "检测到已有 $HOME/.local/bin/agy，跳过安装（agy 支持自动更新）。"
-    return 0
+  else
+    ensure_curl
+    curl -fsSL https://antigravity.google/cli/install.sh | bash
   fi
-  ensure_curl
-  curl -fsSL https://antigravity.google/cli/install.sh | bash
+  configure_agy_permissions
 }
 
 apply_cc_switch_webdav_providers() {
