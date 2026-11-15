@@ -1076,7 +1076,8 @@ install_agy() {
     echo "检测到已有 $HOME/.local/bin/agy，跳过安装（agy 支持自动更新）。"
   else
     ensure_curl
-    curl -fsSL https://antigravity.google/cli/install.sh | bash
+    # 过滤 agy install 内部在 google.Init() 前调用 glog.Info 产生的无害 stderr 告警前缀
+    { curl -fsSL https://antigravity.google/cli/install.sh | bash 2>&1 1>&3 | { grep -v '^ERROR: logging before google\.Init:' >&2 || true; }; } 3>&1
   fi
   configure_agy_permissions
 }
