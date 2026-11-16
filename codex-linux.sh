@@ -511,7 +511,7 @@ tui_handle_key() {
         if [[ "$TUI_ALLOW_EMPTY" == "true" ]]; then
           return 1
         fi
-        TUI_MSG="请至少选择一项（按空格勾选）"
+        TUI_MSG="请至少选择一项（按空格勾选；已安装项 [✓] 按空格可切换为 [+] 重装）"
         return 0
       fi
       return 1
@@ -527,9 +527,19 @@ tui_render_frame() {
   local fd="$1" title="$2" show_status="$3"
   local total="${#TOOL_IDS[@]}" i mark pointer status_tag line
   printf '\033[1m%s\033[0m\033[K\n' "$title" >&"$fd"
-  printf '\033[2m操作: ↑/↓ 移动  空格 勾选/取消  a 全选/全不选  Enter 确认  q 退出\033[0m\033[K\n' >&"$fd"
+  if [[ "$show_status" == "true" && "$ACTION" != "uninstall" ]]; then
+    printf '\033[2m操作: ↑/↓ 移动  空格 勾选/取消  a 全选/全不选  Enter 确认  q 退出（[✓] 已安装  [*] 安装  [+] 重装）\033[0m\033[K\n' >&"$fd"
+  else
+    printf '\033[2m操作: ↑/↓ 移动  空格 勾选/取消  a 全选/全不选  Enter 确认  q 退出\033[0m\033[K\n' >&"$fd"
+  fi
   for i in "${!TOOL_IDS[@]}"; do
-    if [[ "${TOOL_SELECTED[$i]}" == "1" ]]; then
+    if [[ "$show_status" == "true" && "$ACTION" != "uninstall" && "${TOOL_INSTALLED[$i]}" == "1" ]]; then
+      if [[ "${TOOL_SELECTED[$i]}" == "1" ]]; then
+        mark="[+]"
+      else
+        mark="[✓]"
+      fi
+    elif [[ "${TOOL_SELECTED[$i]}" == "1" ]]; then
       mark="[*]"
     else
       mark="[ ]"
@@ -629,7 +639,14 @@ select_tools_for_install() {
   fi
 
   if has_tty; then
-    tui_multiselect "请选择要安装的 CLI 工具：" "false" "false"
+    detect_installed_tools
+    local i
+    for i in "${!TOOL_IDS[@]}"; do
+      if [[ "${TOOL_INSTALLED[$i]}" == "1" ]]; then
+        TOOL_SELECTED[$i]=0
+      fi
+    done
+    tui_multiselect "请选择要安装的 CLI 工具：" "true" "false"
   else
     echo "未检测到交互终端且未指定 --harness，使用默认选择：claude, codex, cc-switch。"
   fi
@@ -730,7 +747,6 @@ detect_installed_tools() {
         TOOL_INSTALLED[$i]=1
       fi
     fi
-    TOOL_SELECTED[$i]="${TOOL_INSTALLED[$i]}"
   done
 }
 
@@ -783,6 +799,7 @@ run_uninstall() {
   echo
 
   detect_installed_tools
+  TOOL_SELECTED=("${TOOL_INSTALLED[@]}")
 
   if [[ -n "$HARNESS_ARG" ]]; then
     if ! apply_tool_list "$HARNESS_ARG"; then
