@@ -32,7 +32,15 @@ bash install.sh
   - 满足则复用现有环境，否则通过 [nvm](https://github.com/nvm-sh/nvm) 安装 Node 24 LTS（用户级，无需 root）
   - 仅安装 `agy` / `cc-switch` 时不会安装 Node.js
 - **bubblewrap** — 仅当选择 `claude` 或 `codex` 时按发行版安装（Ubuntu/Debian 用 `apt`，Arch Linux 用 `pacman`，CentOS/RHEL 兼容系统用 `dnf` 或 `yum`）
-- **Antigravity CLI (`agy`) 权限初始化** — 勾选 `agy` 时会自动将 `~/.gemini/antigravity-cli/settings.json` 初始化为最高权限（`agentMode: "auto"`、`toolPermission: "always-proceed"`、`artifactReviewPolicy: "always-proceed"`、`allowNonWorkspaceAccess: true`、`enableTerminalSandbox: false`，并在 `permissions.allow` 中放行 `read_file(*)`、`write_file(*)`、`command(*)`、`mcp(*)`、`read_url(*)`、`execute_url(*)`、`download_url(*)` 全部 7 类动作；若已有配置文件则合并保留原字段与自定义 `ask`/`deny` 规则）
+- **bypass-permission（免确认最高权限）模式** — 交互安装时会询问是否将所有 harness 配置为 bypass-permission 模式（`[y/N]` 默认 `N`，也可通过 `--bypass-permissions` 直接启用）；启用后会以合并方式保留原有配置并写入各工具的最高权限设置：
+  - `claude`（`~/.claude/settings.json`）：`permissions.defaultMode: "bypassPermissions"`、`skipDangerousModePermissionPrompt: true`
+  - `codex`（`~/.codex/config.toml`）：`approval_policy = "never"`、`sandbox_mode = "danger-full-access"`
+  - `dsh`（`~/.dsh/settings.yaml`）：`permission.defaultPreset: danger-full-access`
+  - `agy`（`~/.gemini/antigravity-cli/settings.json`）：`agentMode: "auto"`、`toolPermission: "always-proceed"`、`artifactReviewPolicy: "always-proceed"`、`allowNonWorkspaceAccess: true`、`enableTerminalSandbox: false` 并放行全部 7 类 `permissions.allow` 规则
+  - `grok`（`~/.grok/config.toml`）：`[ui]` 下 `permission_mode = "always-approve"`
+  - `gemini`（`~/.gemini/settings.json`）：`general.defaultApprovalMode: "auto_edit"`、`security.disableYoloMode: false`（Gemini CLI 出于安全限制不允许在配置文件持久化 `yolo`，完全免确认需通过 `gemini --yolo` 启动）
+  - `opencode`（`~/.config/opencode/opencode.json`）：`permission["*"] = "allow"`
+  - `pi`：默认即为无确认执行模式（YOLO by default），无需额外配置
 - **cc-switch-cli 与 WebDAV** — 勾选 `cc-switch` 时安装并写入 `PATH` / `IS_SANDBOX=1`，随后询问是否从 WebDAV 导入配置（`[y/N]` 默认 `N`）；导入后会自动为本次已选且支持的单配置工具（`claude`、`codex`、`gemini`、`opencode`）应用当前 provider
 
 > **CC-Switch 支持说明**：脚本安装的 `cc-switch-cli`（[SaladDay/cc-switch-cli](https://github.com/SaladDay/cc-switch-cli)）支持管理 `claude`、`codex`、`gemini`、`opencode`、`pi` 等，**暂不支持**管理 `dsh`、`agy`、`grok`（这三款需按各自方式登录或配置 API Key；若使用桌面端 [CC-Switch](https://github.com/farion1231/cc-switch)，桌面端已支持 `grok`、`dsh`、`agy` 等）。
@@ -70,6 +78,7 @@ printenv IS_SANDBOX   # 验证输出 1
 bash install.sh --proxy 127.0.0.1:7890                # 安装前非交互配置系统代理（支持 http/socks5）
 bash install.sh --harness claude,codex,dsh,cc-switch  # 非交互指定要安装的工具（支持 all）
 bash install.sh --skip-config                         # 跳过 WebDAV 配置询问，仅安装工具
+bash install.sh --bypass-permissions                  # 将所有已选/已安装的 harness 配置为 bypass-permission 模式
 bash install.sh --uninstall                           # 交互多选卸载已安装工具（也可配合 --harness）
 bash install.sh --help                                # 查看帮助信息
 ```

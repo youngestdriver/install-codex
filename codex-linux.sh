@@ -14,6 +14,7 @@ fi
 ACTION="install"
 SKIP_CONFIG=false
 WEBDAV_IMPORT=false
+BYPASS_PERMISSIONS=false
 HARNESS_ARG=""
 PROXY_ARG=""
 PROXY_INIT_URL="${PROXY_INIT_URL:-https://url.qzh.su/proxy}"
@@ -147,10 +148,11 @@ show_usage() {
                       可选: claude, codex, dsh, agy, grok, gemini, opencode, pi, cc-switch
                       示例: --harness claude,codex,dsh,cc-switch
                             --harness all
-  --proxy <地址>      安装前调用 proxy-init 配置系统代理（如 127.0.0.1:7890）
-  --skip-config       跳过 WebDAV 配置询问，仅安装工具
-  --uninstall         进入卸载模式（可交互多选或配合 --harness 指定）
-  -h, --help          显示此帮助信息
+  --proxy <地址>        安装前调用 proxy-init 配置系统代理（如 127.0.0.1:7890）
+  --skip-config         跳过 WebDAV 配置询问，仅安装工具
+  --bypass-permissions  将所有已选/已安装的 harness 配置为 bypass-permission 最高权限模式
+  --uninstall           进入卸载模式（可交互多选或配合 --harness 指定）
+  -h, --help            显示此帮助信息
 EOF
 }
 
@@ -162,6 +164,9 @@ parse_args() {
         ;;
       --skip-config)
         SKIP_CONFIG=true
+        ;;
+      --bypass-permissions|--bypass-permission)
+        BYPASS_PERMISSIONS=true
         ;;
       --proxy)
         if [[ -z "${2:-}" ]]; then
@@ -679,6 +684,18 @@ confirm_uninstall() {
   [[ "$confirm" =~ ^[Yy]$ ]]
 }
 
+# 询问是否开启 bypass-permission 模式（[y/N] 默认 N）
+ask_bypass_permissions() {
+  if [[ "$BYPASS_PERMISSIONS" == "true" ]] || [[ -n "$HARNESS_ARG" ]] || ! has_tty; then
+    return
+  fi
+  local ans
+  read -rp "是否将所有 harness 配置为 bypass-permission（免确认最高权限）模式？[y/N]: " ans </dev/tty
+  if [[ "$ans" =~ ^[Yy]$ ]]; then
+    BYPASS_PERMISSIONS=true
+  fi
+}
+
 select_config_mode() {
   if [[ "$SKIP_CONFIG" == "true" ]] || ! is_selected "cc-switch"; then
     return
@@ -964,105 +981,169 @@ install_npm_pkg() {
   fi
 }
 
-# 将 Antigravity CLI (~/.gemini/antigravity-cli/settings.json) 初始化为最高权限
-configure_agy_permissions() {
-  local cfg_dir="$HOME/.gemini/antigravity-cli"
-  local cfg_file="${cfg_dir}/settings.json"
+# 通用 JSON 配置文件合并写入（支持 claude / agy / gemini / opencode）
+upsert_json_config() {
+  local cfg_file="$1" tool_id="$2"
+  local cfg_dir
+  cfg_dir="$(dirname "$cfg_file")"
   mkdir -p "$cfg_dir"
 
   if [[ -s "$cfg_file" ]]; then
-    local tmp_cfg
-    tmp_cfg="$(mktemp "${cfg_dir}/.settings.XXXXXX.json")"
+    local tmp_cfg raw_json
+    tmp_cfg="$(mktemp "${cfg_dir}/.cfg.XXXXXX.json")"
+    raw_json="$(cat "$cfg_file")"
     if command_exists python3 && python3 -c "import json" >/dev/null 2>&1; then
-      if AGY_CFG_JSON="$(cat "$cfg_file")" python3 - > "$tmp_cfg" <<'PY'
+      if CFG_JSON="$raw_json" CFG_TOOL="$tool_id" python3 - > "$tmp_cfg" <<'PY'
 import json, os, sys
 
-data = json.loads(os.environ["AGY_CFG_JSON"])
+data = json.loads(os.environ["CFG_JSON"])
 if not isinstance(data, dict):
     raise ValueError("settings root is not an object")
 
-data["agentMode"] = "auto"
-data["toolPermission"] = "always-proceed"
-data["artifactReviewPolicy"] = "always-proceed"
-data["allowNonWorkspaceAccess"] = True
-data["enableTerminalSandbox"] = False
-
-perms = data.get("permissions")
-if not isinstance(perms, dict):
-    perms = {}
-allow = perms.get("allow")
-if not isinstance(allow, list):
-    allow = []
-for rule in [
-    "read_file(*)",
-    "write_file(*)",
-    "command(*)",
-    "mcp(*)",
-    "read_url(*)",
-    "execute_url(*)",
-    "download_url(*)",
-]:
-    if rule not in allow:
-        allow.append(rule)
-perms["allow"] = allow
-data["permissions"] = perms
+tool = os.environ["CFG_TOOL"]
+if tool == "claude":
+    perms = data.get("permissions")
+    if not isinstance(perms, dict):
+        perms = {}
+    perms["defaultMode"] = "bypassPermissions"
+    data["permissions"] = perms
+    data["skipDangerousModePermissionPrompt"] = True
+elif tool == "agy":
+    data["agentMode"] = "auto"
+    data["toolPermission"] = "always-proceed"
+    data["artifactReviewPolicy"] = "always-proceed"
+    data["allowNonWorkspaceAccess"] = True
+    data["enableTerminalSandbox"] = False
+    perms = data.get("permissions")
+    if not isinstance(perms, dict):
+        perms = {}
+    allow = perms.get("allow")
+    if not isinstance(allow, list):
+        allow = []
+    for rule in [
+        "read_file(*)", "write_file(*)", "command(*)", "mcp(*)",
+        "read_url(*)", "execute_url(*)", "download_url(*)",
+    ]:
+        if rule not in allow:
+            allow.append(rule)
+    perms["allow"] = allow
+    data["permissions"] = perms
+elif tool == "gemini":
+    general = data.get("general")
+    if not isinstance(general, dict):
+        general = {}
+    general["defaultApprovalMode"] = "auto_edit"
+    data["general"] = general
+    sec = data.get("security")
+    if not isinstance(sec, dict):
+        sec = {}
+    sec["disableYoloMode"] = False
+    data["security"] = sec
+elif tool == "opencode":
+    data.setdefault("$schema", "https://opencode.ai/config.json")
+    perm = data.get("permission")
+    if isinstance(perm, dict):
+        perm["*"] = "allow"
+    else:
+        data["permission"] = {"*": "allow"}
+else:
+    raise ValueError(f"unsupported tool: {tool}")
 
 json.dump(data, sys.stdout, indent=2, ensure_ascii=False)
 sys.stdout.write("\n")
 PY
       then
         mv "$tmp_cfg" "$cfg_file"
+        return 0
       else
         rm -f "$tmp_cfg"
         echo "警告: 无法解析现有 ${cfg_file}，已保留原文件未修改。" >&2
-        return 0
+        return 1
       fi
     elif command_exists node; then
-      if AGY_CFG_JSON="$(cat "$cfg_file")" node - > "$tmp_cfg" <<'JS'
-const data = JSON.parse(process.env.AGY_CFG_JSON);
+      if CFG_JSON="$raw_json" CFG_TOOL="$tool_id" node - > "$tmp_cfg" <<'JS'
+const data = JSON.parse(process.env.CFG_JSON);
 if (!data || typeof data !== "object" || Array.isArray(data)) {
   throw new Error("settings root is not an object");
 }
-data.agentMode = "auto";
-data.toolPermission = "always-proceed";
-data.artifactReviewPolicy = "always-proceed";
-data.allowNonWorkspaceAccess = true;
-data.enableTerminalSandbox = false;
-if (!data.permissions || typeof data.permissions !== "object" || Array.isArray(data.permissions)) {
-  data.permissions = {};
-}
-if (!Array.isArray(data.permissions.allow)) {
-  data.permissions.allow = [];
-}
-for (const rule of [
-  "read_file(*)",
-  "write_file(*)",
-  "command(*)",
-  "mcp(*)",
-  "read_url(*)",
-  "execute_url(*)",
-  "download_url(*)",
-]) {
-  if (!data.permissions.allow.includes(rule)) {
-    data.permissions.allow.push(rule);
+const tool = process.env.CFG_TOOL;
+if (tool === "claude") {
+  if (!data.permissions || typeof data.permissions !== "object" || Array.isArray(data.permissions)) {
+    data.permissions = {};
   }
+  data.permissions.defaultMode = "bypassPermissions";
+  data.skipDangerousModePermissionPrompt = true;
+} else if (tool === "agy") {
+  data.agentMode = "auto";
+  data.toolPermission = "always-proceed";
+  data.artifactReviewPolicy = "always-proceed";
+  data.allowNonWorkspaceAccess = true;
+  data.enableTerminalSandbox = false;
+  if (!data.permissions || typeof data.permissions !== "object" || Array.isArray(data.permissions)) {
+    data.permissions = {};
+  }
+  if (!Array.isArray(data.permissions.allow)) {
+    data.permissions.allow = [];
+  }
+  for (const rule of [
+    "read_file(*)", "write_file(*)", "command(*)", "mcp(*)",
+    "read_url(*)", "execute_url(*)", "download_url(*)",
+  ]) {
+    if (!data.permissions.allow.includes(rule)) {
+      data.permissions.allow.push(rule);
+    }
+  }
+} else if (tool === "gemini") {
+  if (!data.general || typeof data.general !== "object" || Array.isArray(data.general)) {
+    data.general = {};
+  }
+  data.general.defaultApprovalMode = "auto_edit";
+  if (!data.security || typeof data.security !== "object" || Array.isArray(data.security)) {
+    data.security = {};
+  }
+  data.security.disableYoloMode = false;
+} else if (tool === "opencode") {
+  if (data.$schema === undefined) {
+    data.$schema = "https://opencode.ai/config.json";
+  }
+  if (data.permission && typeof data.permission === "object" && !Array.isArray(data.permission)) {
+    data.permission["*"] = "allow";
+  } else {
+    data.permission = { "*": "allow" };
+  }
+} else {
+  throw new Error("unsupported tool: " + tool);
 }
 process.stdout.write(JSON.stringify(data, null, 2) + "\n");
 JS
       then
         mv "$tmp_cfg" "$cfg_file"
+        return 0
       else
         rm -f "$tmp_cfg"
         echo "警告: 无法解析现有 ${cfg_file}，已保留原文件未修改。" >&2
-        return 0
+        return 1
       fi
     else
       rm -f "$tmp_cfg"
       echo "警告: ${cfg_file} 已存在且未检测到 python3/node，跳过合并写入以避免覆盖原有配置。" >&2
-      return 0
+      return 1
     fi
-  else
-    cat > "$cfg_file" <<'AGY_CFG_EOF'
+  fi
+
+  case "$tool_id" in
+    claude)
+      cat > "$cfg_file" <<'EOF'
+{
+  "permissions": {
+    "defaultMode": "bypassPermissions"
+  },
+  "skipDangerousModePermissionPrompt": true
+}
+EOF
+      ;;
+    agy)
+      cat > "$cfg_file" <<'EOF'
 {
   "agentMode": "auto",
   "toolPermission": "always-proceed",
@@ -1081,10 +1162,220 @@ JS
     ]
   }
 }
-AGY_CFG_EOF
-  fi
+EOF
+      ;;
+    gemini)
+      cat > "$cfg_file" <<'EOF'
+{
+  "general": {
+    "defaultApprovalMode": "auto_edit"
+  },
+  "security": {
+    "disableYoloMode": false
+  }
+}
+EOF
+      ;;
+    opencode)
+      cat > "$cfg_file" <<'EOF'
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "*": "allow"
+  }
+}
+EOF
+      ;;
+  esac
+}
 
-  echo "已将 Antigravity CLI 权限配置为最高级别（${cfg_file}）。"
+# 更新 TOML 顶层字符串键（插在首个 [table] 之前，保留已有表与注释）
+upsert_toml_top_kv() {
+  local cfg_file="$1" key="$2" val="$3"
+  local cfg_dir tmp_cfg
+  cfg_dir="$(dirname "$cfg_file")"
+  mkdir -p "$cfg_dir"
+  if [[ ! -s "$cfg_file" ]]; then
+    printf '%s = "%s"\n' "$key" "$val" > "$cfg_file"
+    return 0
+  fi
+  tmp_cfg="$(mktemp "${cfg_dir}/.cfg.XXXXXX.toml")"
+  awk -v key="$key" -v val="$val" '
+    BEGIN { in_top = 1; done = 0 }
+    in_top && /^[[:space:]]*\[/ {
+      if (!done) {
+        print key " = \"" val "\""
+        done = 1
+      }
+      in_top = 0
+    }
+    in_top && $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+      if (!done) {
+        print key " = \"" val "\""
+        done = 1
+      }
+      next
+    }
+    { print }
+    END {
+      if (!done) {
+        print key " = \"" val "\""
+      }
+    }
+  ' "$cfg_file" > "$tmp_cfg"
+  mv "$tmp_cfg" "$cfg_file"
+}
+
+# 更新 TOML 指定 [table] 下的字符串键（不存在则新建该表）
+upsert_toml_table_kv() {
+  local cfg_file="$1" table="$2" key="$3" val="$4"
+  local cfg_dir tmp_cfg
+  cfg_dir="$(dirname "$cfg_file")"
+  mkdir -p "$cfg_dir"
+  if [[ ! -s "$cfg_file" ]]; then
+    printf '[%s]\n%s = "%s"\n' "$table" "$key" "$val" > "$cfg_file"
+    return 0
+  fi
+  tmp_cfg="$(mktemp "${cfg_dir}/.cfg.XXXXXX.toml")"
+  awk -v tbl="$table" -v key="$key" -v val="$val" '
+    BEGIN { found_tbl = 0; in_tbl = 0; done = 0 }
+    /^[[:space:]]*\[/ {
+      if (in_tbl && !done) {
+        print key " = \"" val "\""
+        done = 1
+      }
+      in_tbl = 0
+      if ($0 ~ "^[[:space:]]*\\[" tbl "\\][[:space:]]*(#.*)?$") {
+        found_tbl = 1
+        in_tbl = 1
+      }
+      print
+      next
+    }
+    in_tbl && $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+      if (!done) {
+        print key " = \"" val "\""
+        done = 1
+      }
+      next
+    }
+    { print }
+    END {
+      if (!found_tbl) {
+        print ""
+        print "[" tbl "]"
+        print key " = \"" val "\""
+      } else if (in_tbl && !done) {
+        print key " = \"" val "\""
+      }
+    }
+  ' "$cfg_file" > "$tmp_cfg"
+  mv "$tmp_cfg" "$cfg_file"
+}
+
+# 更新 DeepSeek Harness (~/.dsh/settings.yaml) 权限预设为 danger-full-access
+upsert_dsh_yaml() {
+  local cfg_file="$1"
+  local cfg_dir tmp_cfg
+  cfg_dir="$(dirname "$cfg_file")"
+  mkdir -p "$cfg_dir"
+  if [[ ! -s "$cfg_file" ]]; then
+    cat > "$cfg_file" <<'EOF'
+permission:
+  defaultPreset: danger-full-access
+EOF
+    return 0
+  fi
+  tmp_cfg="$(mktemp "${cfg_dir}/.cfg.XXXXXX.yaml")"
+  awk '
+    BEGIN { found = 0; in_perm = 0; done = 0 }
+    /^permission:[[:space:]]*(#.*)?$/ {
+      found = 1
+      in_perm = 1
+      print
+      next
+    }
+    in_perm && /^[^[:space:]#]/ {
+      if (!done) {
+        print "  defaultPreset: danger-full-access"
+        done = 1
+      }
+      in_perm = 0
+    }
+    in_perm && /^[[:space:]]+defaultPreset:[[:space:]]*/ {
+      if (!done) {
+        print "  defaultPreset: danger-full-access"
+        done = 1
+      }
+      next
+    }
+    { print }
+    END {
+      if (!found) {
+        print ""
+        print "permission:"
+        print "  defaultPreset: danger-full-access"
+      } else if (in_perm && !done) {
+        print "  defaultPreset: danger-full-access"
+      }
+    }
+  ' "$cfg_file" > "$tmp_cfg"
+  mv "$tmp_cfg" "$cfg_file"
+}
+
+# 按需将所有已选或本机已安装的 harness 配置为 bypass-permission 最高权限模式
+configure_bypass_permissions() {
+  [[ "$BYPASS_PERMISSIONS" == "true" ]] || return 0
+  detect_installed_tools
+
+  echo
+  echo "正在将已选/已安装的 harness 配置为 bypass-permission 模式 ..."
+  local i id
+  for i in "${!TOOL_IDS[@]}"; do
+    id="${TOOL_IDS[$i]}"
+    [[ "$id" == "cc-switch" ]] && continue
+    if [[ "${TOOL_SELECTED[$i]}" != "1" && "${TOOL_INSTALLED[$i]}" != "1" ]]; then
+      continue
+    fi
+    case "$id" in
+      claude)
+        if upsert_json_config "$HOME/.claude/settings.json" "claude"; then
+          echo "  - claude: 已设置 permissions.defaultMode=bypassPermissions（~/.claude/settings.json）"
+        fi
+        ;;
+      codex)
+        upsert_toml_top_kv "$HOME/.codex/config.toml" "approval_policy" "never"
+        upsert_toml_top_kv "$HOME/.codex/config.toml" "sandbox_mode" "danger-full-access"
+        echo "  - codex: 已设置 approval_policy=never, sandbox_mode=danger-full-access（~/.codex/config.toml）"
+        ;;
+      dsh)
+        upsert_dsh_yaml "$HOME/.dsh/settings.yaml"
+        echo "  - dsh: 已设置 permission.defaultPreset=danger-full-access（~/.dsh/settings.yaml）"
+        ;;
+      agy)
+        if upsert_json_config "$HOME/.gemini/antigravity-cli/settings.json" "agy"; then
+          echo "  - agy: 已设置最高权限与全工具放行（~/.gemini/antigravity-cli/settings.json）"
+        fi
+        ;;
+      grok)
+        upsert_toml_table_kv "$HOME/.grok/config.toml" "ui" "permission_mode" "always-approve"
+        echo "  - grok: 已设置 [ui] permission_mode=always-approve（~/.grok/config.toml）"
+        ;;
+      gemini)
+        if upsert_json_config "$HOME/.gemini/settings.json" "gemini"; then
+          echo "  - gemini: 已设置 general.defaultApprovalMode=auto_edit（~/.gemini/settings.json；完全免确认请用 gemini --yolo）"
+        fi
+        ;;
+      opencode)
+        if upsert_json_config "$HOME/.config/opencode/opencode.json" "opencode"; then
+          echo "  - opencode: 已设置 permission.*=allow（~/.config/opencode/opencode.json）"
+        fi
+        ;;
+      pi)
+        echo "  - pi: 默认即为无确认执行模式（YOLO by default），无需额外配置"
+        ;;
+    esac
+  done
 }
 
 install_agy() {
@@ -1096,7 +1387,6 @@ install_agy() {
     # 过滤 agy install 内部在 google.Init() 前调用 glog.Info 产生的无害 stderr 告警前缀
     { curl -fsSL https://antigravity.google/cli/install.sh | bash 2>&1 1>&3 | { grep -v '^ERROR: logging before google\.Init:' >&2 || true; }; } 3>&1
   fi
-  configure_agy_permissions
 }
 
 apply_cc_switch_webdav_providers() {
@@ -1294,6 +1584,7 @@ main() {
 
   select_tools_for_install
   select_config_mode
+  ask_bypass_permissions
 
   SHELL_RC="$(detect_shell_rc)"
 
@@ -1335,6 +1626,8 @@ main() {
   if ! is_selected "cc-switch" && is_selected "agy"; then
     configure_shell_env "local-bin"
   fi
+
+  configure_bypass_permissions
 
   print_summary
 }
